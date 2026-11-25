@@ -21,22 +21,25 @@
 - **Node.js 18+ / Express 4** — REST API, JWT, Zod validation, Multer upload, Pino log
 - **Angular 20** — standalone components, signals, Thai Buddhist-era date formatting
 
-## เริ่มใช้งานเร็ว (โหมดทดลอง ไม่ต้องติดตั้ง PostgreSQL เอง)
+## เริ่มใช้งานเร็ว
+
+ต้องติดตั้ง PostgreSQL ก่อน แล้วสร้างฐานข้อมูลเปล่าชื่อ `rental_debt`
 
 ```bash
-cd server
+cd backend
 npm install
-npm run dev:embedded     # ดาวน์โหลด PostgreSQL ฝังตัว + สร้าง schema + start API ที่ :3000
-npm run seed             # (terminal ที่สอง) ใส่ข้อมูลตัวอย่าง
+cp .env.example .env     # แก้ DB_PASSWORD ให้ตรงกับเครื่อง
+npm run migrate          # สร้างตาราง
+npm run dev              # start API ที่ :3000
 ```
 
 ```bash
-cd web
+cd frontend
 npm install
 npm start                # http://localhost:4200 (proxy /api → localhost:3000)
 ```
 
-เข้าสู่ระบบ: `admin@medrental.co.th` / `Admin123!`
+ระบบไม่มีบัญชีเริ่มต้น ต้องเพิ่มบัญชี admin คนแรกในตาราง `users` เอง ดูหัวข้อ 7 ในคู่มือการติดตั้ง
 
 > รายละเอียดการติดตั้งแบบ production (PostgreSQL จริง, Nginx, systemd) อยู่ใน `docs/01-คู่มือการติดตั้ง.md`
 > รายละเอียดการใช้งานทุกหน้าจออยู่ใน `docs/02-คู่มือการใช้งาน.md`
@@ -45,22 +48,15 @@ npm start                # http://localhost:4200 (proxy /api → localhost:3000)
 
 ```
 rental-debt-system/
-├── db/schema.sql            # schema ทั้งหมด (idempotent — รันซ้ำได้)
-├── server/
+├── backend/
+│   ├── db/schema.sql        # schema ทั้งหมด (idempotent — รันซ้ำได้)
 │   ├── src/                 # API (config, routes, services, middleware)
-│   ├── scripts/             # migrate, seed, dev:embedded, สร้าง PDF ตัวอย่าง
-│   ├── tests/               # 32 tests (unit + integration บน embedded PostgreSQL)
+│   ├── scripts/             # migrate สร้างตาราง
 │   └── logs/, uploads/      # เกิดตอนรัน (ไม่ commit)
-└── web/src/app/
+└── frontend/src/app/
     ├── core/                # models, api service, auth, interceptor, format
     ├── layout/              # shell (sidebar + topbar)
     └── pages/               # 13 หน้า: dashboard, contracts, invoices, cheques, ...
-```
-
-## การทดสอบ
-
-```bash
-cd server && npm test      # 32/32 ผ่าน (สตาร์ท embedded PostgreSQL พอร์ต 55440 อัตโนมัติ)
 ```
 
 ## เอกสาร

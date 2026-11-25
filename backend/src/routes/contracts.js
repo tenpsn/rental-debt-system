@@ -186,9 +186,22 @@ export default function contractRoutes(db) {
         db.query('SELECT * FROM equipment WHERE contract_id = $1 ORDER BY name', [req.params.id]),
       ]);
 
+      // คำนวณยอดสรุปจากงวดทั้งหมด ให้ตรงกับหน้ารายการสัญญา
+      const sumBy = (rows, key) =>
+        Math.round(rows.reduce((total, row) => total + Number(row[key] || 0), 0) * 100) / 100;
+      const invoicedRows = periods.rows.filter((p) => p.invoice_id);
+      const uninvoicedRows = periods.rows.filter((p) => !p.invoice_id);
+      const uninvoicedDueDates = uninvoicedRows.map((p) => p.due_date).filter(Boolean).sort();
+
       res.json({
         ...mapContract(contract),
         totalPeriods: periods.rowCount,
+        invoicedPeriods: invoicedRows.length,
+        invoicedAmount: sumBy(invoicedRows, 'total_amount'),
+        collectedAmount: sumBy(invoicedRows, 'cheque_received_amount'),
+        outstandingAmount: sumBy(invoicedRows, 'outstanding_amount'),
+        remainingValue: sumBy(uninvoicedRows, 'expected_amount'),
+        nextDueDate: uninvoicedDueDates[0] || null,
         periods: periods.rows.map((p) => ({
           id: p.id,
           periodNo: p.period_no,

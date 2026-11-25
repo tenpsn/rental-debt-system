@@ -145,6 +145,8 @@ export default function chequeRoutes(db) {
 
       res.json({
         ...mapCheque(cheque),
+        // นับจำนวนใบแจ้งหนี้จากรายการตัดชำระจริง
+        invoiceCount: allocations.rowCount,
         allocations: allocations.rows.map((a) => ({
           id: a.id,
           invoiceId: a.invoice_id,

@@ -6,7 +6,7 @@ import { logger } from './logger.js';
 const app = createApp(db);
 
 const server = app.listen(config.port, () => {
-  logger.info(`Rental debt API พร้อมใช้งานที่ http://localhost:${config.port}/api`);
+  logger.info(`Rental debt API is ready at http://localhost:${config.port}/api`);
 });
 
 async function shutdown(signal) {

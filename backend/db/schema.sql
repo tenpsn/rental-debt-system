@@ -1,7 +1,7 @@
 -- =============================================================================
 -- ระบบบันทึกและติดตามหนี้จากการเช่าเครื่อง (Rental Debt Tracking System)
 -- PostgreSQL schema  —  version 1.0
--- ใช้งาน: psql -U <user> -d rental_debt -f db/schema.sql
+-- ใช้งาน: psql -U <user> -d rental_debt -f backend/db/schema.sql
 -- =============================================================================
 
 BEGIN;
