@@ -3,7 +3,8 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../core/api.service';
 import { AuditLog } from '../core/models';
-import { ACTION_LABEL, thaiDateTime } from '../core/format';
+import { ACTION_LABEL, ACTION_TONE, thaiDateTime } from '../core/format';
+import { AuditLine, ENTITY_LABEL, describeAudit } from '../core/audit-format';
 
 @Component({
   selector: 'app-audit',
@@ -31,7 +32,7 @@ import { ACTION_LABEL, thaiDateTime } from '../core/format';
             <label>ประเภทข้อมูล</label>
             <select [(ngModel)]="entityType" (ngModelChange)="load()">
               <option value="">ทั้งหมด</option>
-              @for (t of entityTypes; track t) { <option [value]="t">{{ t }}</option> }
+              @for (t of entityTypes; track t) { <option [value]="t">{{ entityLabel(t) }}</option> }
             </select>
           </div>
         </div>
@@ -47,11 +48,21 @@ import { ACTION_LABEL, thaiDateTime } from '../core/format';
               <tr>
                 <td class="small" style="white-space:nowrap">{{ thaiDateTime(log.createdAt) }}</td>
                 <td class="small">{{ log.actorEmail || '—' }}</td>
-                <td><span class="chip">{{ actionLabel(log.action) }}</span></td>
-                <td class="small">{{ log.entityType }}</td>
+                <td><span [class]="'chip ' + actionTone(log.action)">{{ actionLabel(log.action) }}</span></td>
+                <td class="small">{{ entityLabel(log.entityType) }}</td>
                 <td class="small muted">{{ log.ipAddress || '—' }}</td>
-                <td class="small muted" style="max-width:420px">
-                  <code style="font-size:11px;word-break:break-all">{{ payload(log) }}</code>
+                <td class="small audit-detail">
+                  <div class="audit-lines">
+                    @for (line of describe(log); track $index) {
+                      @if (line.heading) {
+                        <div class="audit-heading">{{ line.label }}</div>
+                      } @else {
+                        <div><span class="muted">{{ line.label }}:</span> {{ line.value }}</div>
+                      }
+                    } @empty {
+                      <span class="muted">—</span>
+                    }
+                  </div>
                 </td>
               </tr>
             } @empty {
@@ -75,6 +86,7 @@ export class AuditComponent {
 
   readonly thaiDateTime = thaiDateTime;
   readonly actionLabel = (a: string) => ACTION_LABEL[a] ?? a;
+  readonly actionTone = (a: string) => ACTION_TONE[a] ?? '';
 
   constructor() {
     this.load();
@@ -84,12 +96,16 @@ export class AuditComponent {
     this.api.auditLogs({ action: this.action, entity_type: this.entityType, limit: 200 }).subscribe((rows) => this.logs.set(rows));
   }
 
-  payload(log: AuditLog) {
-    if (!log.payload) return '—';
-    try {
-      return JSON.stringify(log.payload);
-    } catch {
-      return '—';
+  readonly entityLabel = (t: string) => ENTITY_LABEL[t] ?? t;
+
+  // แปลงรายละเอียดเป็นบรรทัดภาษาไทย เก็บผลไว้ จะได้ไม่คำนวณใหม่ทุกครั้งที่หน้าจอวาด
+  private readonly described = new WeakMap<AuditLog, AuditLine[]>();
+  describe(log: AuditLog): AuditLine[] {
+    let lines = this.described.get(log);
+    if (!lines) {
+      lines = describeAudit(log.payload);
+      this.described.set(log, lines);
     }
+    return lines;
   }
 }

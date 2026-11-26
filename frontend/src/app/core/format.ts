@@ -1,3 +1,16 @@
+const TODAY_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Bangkok',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+// วันที่วันนี้ตามเวลาประเทศไทย ไม่ใช้ toISOString เพราะนั่นเป็นเวลา UTC
+// ช่วงเที่ยงคืนถึงเจ็ดโมงเช้าจะได้วันที่ของเมื่อวาน
+export function todayIso(): string {
+  return TODAY_FORMATTER.format(new Date());
+}
+
 const THAI_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 const THAI_MONTHS_LONG = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
 
@@ -58,6 +71,13 @@ export const PAYMENT_STATE_LABEL: Record<string, { text: string; tone: string }>
   CANCELLED: { text: 'ยกเลิก', tone: '' },
 };
 
+export const CONTRACT_STATUS_LABEL: Record<string, { text: string; tone: string }> = {
+  DRAFT: { text: 'ร่าง', tone: '' },
+  ACTIVE: { text: 'ใช้งาน', tone: 'green' },
+  COMPLETED: { text: 'สิ้นสุดแล้ว', tone: 'blue' },
+  CANCELLED: { text: 'ยกเลิก', tone: 'red' },
+};
+
 export const CHEQUE_STATUS_LABEL: Record<string, { text: string; tone: string }> = {
   RECEIVED: { text: 'รับเช็คแล้ว', tone: 'blue' },
   DEPOSITED: { text: 'นำฝากแล้ว', tone: 'violet' },
@@ -88,6 +108,21 @@ export const CONTRACT_TYPE_LABEL: Record<string, string> = {
   SHORT_TERM: 'สัญญาระยะสั้น',
 };
 
+// สีของประเภทสัญญา ใช้แยกประเภทให้เห็นเร็วขึ้น
+export const CONTRACT_TYPE_TONE: Record<string, string> = {
+  LEASE: 'blue',
+  PURCHASE_ORDER: 'violet',
+  SHORT_TERM: 'amber',
+};
+
+// สถานะการจัดส่งใบแจ้งหนี้
+export const DELIVERY_STATUS_LABEL: Record<string, { text: string; tone: string }> = {
+  IN_TRANSIT: { text: 'ระหว่างขนส่ง', tone: 'amber' },
+  DELIVERED: { text: 'ส่งถึงแล้ว', tone: 'green' },
+  ACKNOWLEDGED: { text: 'ผู้รับตอบรับ', tone: 'blue' },
+  RETURNED: { text: 'ตีกลับ', tone: 'red' },
+};
+
 export const BILLING_CYCLE_LABEL: Record<string, string> = {
   MONTHLY: 'รายเดือน',
   EVERY_10_DAYS: 'ทุก 10 วัน',
@@ -107,12 +142,40 @@ export const ACTION_LABEL: Record<string, string> = {
   SEED: 'ข้อมูลตัวอย่าง',
 };
 
+// สีของแต่ละการกระทำ เขียวคือเพิ่ม เหลืองคือแก้ แดงคือลบหรือยกเลิก
+export const ACTION_TONE: Record<string, string> = {
+  LOGIN: 'blue',
+  CREATE: 'green',
+  BULK_CREATE: 'green',
+  RENEW: 'green',
+  UPDATE: 'amber',
+  CHANGE_PASSWORD: 'amber',
+  DELETE: 'red',
+  CANCEL: 'red',
+  UPLOAD: 'violet',
+};
+
 export const ROLE_LABEL: Record<string, string> = {
   ADMIN: 'ผู้ดูแลระบบ',
   MANAGER: 'ผู้จัดการ',
   ACCOUNTING: 'ฝ่ายบัญชี',
   REP: 'ผู้แทนพื้นที่',
 };
+
+// สีของแต่ละตำแหน่ง
+export const ROLE_TONE: Record<string, string> = {
+  ADMIN: 'blue',
+  MANAGER: 'violet',
+  ACCOUNTING: 'amber',
+  REP: 'green',
+};
+
+// ป้ายสั้นบนไอคอนไฟล์ ตามชนิดไฟล์จริง
+export function fileIcon(mimeType?: string | null): string {
+  if (mimeType === 'application/pdf') return 'PDF';
+  if (mimeType?.startsWith('image/')) return 'IMG';
+  return 'FILE';
+}
 
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

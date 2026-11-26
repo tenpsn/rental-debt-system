@@ -118,9 +118,15 @@ h3 { font-size: 15px; }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.grid-kpi { grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); }
+/* กล่องตัวเลข 6 กล่อง แบ่งแถวละ 6 3 2 หรือ 1 ให้ลงตัว ไม่มีกล่องเหลือเดี่ยว */
+.grid-kpi { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+@media (max-width: 1379px) { .grid-kpi { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 639px) { .grid-kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 479px) { .grid-kpi { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 1100px) { .grid-4 { grid-template-columns: repeat(2, minmax(0,1fr)); } .grid-3 { grid-template-columns: repeat(2, minmax(0,1fr)); } }
-@media (max-width: 720px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .grid-2, .grid-3, .grid-4 { grid-template-columns: minmax(0, 1fr); } }
+/* ให้กล่องในกริดหดได้ ไม่ถูกตารางดันให้กว้างเกินจอ */
+.grid > * { min-width: 0; }
 
 /* ---------- KPI ---------- */
 .kpi { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); position: relative; overflow: hidden; }
@@ -170,8 +176,50 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(29,111,214,.12); }
 textarea { resize: vertical; min-height: 70px; }
+input:hover:not(:disabled):not(:focus), select:hover:not(:disabled):not(:focus) { border-color: #b9c7d8; }
+input:disabled, select:disabled, textarea:disabled { background: #f4f6fa; color: var(--muted); cursor: not-allowed; }
+
+/* ช่องเลือกรายการ ใช้ลูกศรของเราเอง และเว้นระยะจากขอบขวา */
+select {
+  appearance: none; -webkit-appearance: none; cursor: pointer;
+  padding-right: 36px; min-height: 40px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7a8d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 16px;
+}
+select:focus { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%231d6fd6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); }
+
+/* browser ที่รองรับ แต่งรายการที่เปิดออกมาให้เข้ากับธีม */
+@supports (appearance: base-select) {
+  /* ชื่อยาวให้อยู่บรรทัดเดียว และตัดข้อความก่อนถึงลูกศร */
+  select { appearance: base-select; white-space: nowrap; overflow: clip; overflow-clip-margin: content-box; }
+  select option { white-space: normal; }
+  select::picker-icon { display: none; }
+  select::picker(select) {
+    appearance: base-select;
+    border: 1px solid var(--line); border-radius: 10px; padding: 6px; margin-top: 4px;
+    background: #fff; box-shadow: 0 12px 32px rgba(16, 24, 40, .14);
+    max-height: 320px; overflow-y: auto;
+    /* กว้างเท่าช่องเลือกพอดี และเปิดลงล่างตรงกับช่อง ถ้าที่ไม่พอค่อยเปิดขึ้นบน */
+    width: anchor-size(width); min-width: 0;
+    position-area: block-end span-inline-end;
+    position-try-fallbacks: flip-block;
+    position-try-order: normal;
+  }
+  select option {
+    padding: 8px 10px; border-radius: 7px; font-size: 13.5px; color: var(--ink); cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  select option:hover, select option:focus-visible { background: #f2f6fb; outline: none; }
+  select option:checked { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+  select option::checkmark { content: '✓'; order: 1; margin-left: auto; color: var(--brand); }
+}
+
 .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-.filters .field { min-width: 150px; }
+/* ความกว้างช่องกรองคงที่ เลือกค่าแล้วช่องไม่ขยายตามชื่อ */
+.filters .field { min-width: 150px; flex: 0 0 224px; }
+.filters > .btn { min-height: 40px; }
+/* ตัวกรองข้างหัวข้อหน้า ให้อยู่แถวเดียวกับปุ่ม */
+.page-head > .filters { flex-wrap: nowrap; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -260,9 +308,41 @@ textarea { resize: vertical; min-height: 70px; }
 .file-pill {
   display: inline-flex; align-items: center; gap: 10px; padding: 9px 12px;
   border: 1px solid var(--line); border-radius: 10px; background: #fbfdff; text-decoration: none; color: inherit;
-  max-width: 320px;
+  max-width: 320px; min-width: 0;
 }
-.file-pill:hover { border-color: #b9c7d8; background: #f6f9fd; }
+.file-pill:hover { border-color: #b9c7d8; background: #f6f9fd; text-decoration: none; }
+/* ให้กรอบโฟกัสอยู่รอบกล่องพอดี */
+.file-pill:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* ส่วนชื่อไฟล์ต้องหดได้ ชื่อยาวจะถูกตัดด้วยจุดสามจุด ไม่ล้นออกนอกกรอบ */
+.file-pill > span:last-child { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+/* ไฟล์แนบหนึ่งรายการ กับปุ่มลบที่มุมขวาบน */
+.file-item { position: relative; display: inline-flex; max-width: 320px; min-width: 0; }
+.file-item .file-pill { padding-right: 34px; max-width: 100%; }
+.file-del {
+  position: absolute; top: 6px; right: 6px; width: 24px; height: 24px;
+  display: grid; place-items: center; border: none; border-radius: 6px;
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.file-del:hover:not(:disabled), .file-del:focus-visible { background: var(--red-soft); color: var(--red); outline: none; }
+.file-del:disabled { opacity: .5; cursor: not-allowed; }
+@media (pointer: coarse) { .file-del { width: 32px; height: 32px; top: 4px; right: 4px; } }
+/* รายละเอียดในบันทึกการใช้งาน ใช้พื้นที่เต็มความกว้าง เรียงเป็นหลายคอลัมน์ตามที่ว่าง */
+.audit-detail { width: 100%; min-width: 260px; line-height: 1.6; }
+.table-wrap td.audit-detail { white-space: normal; }
+.audit-lines { columns: 220px; column-gap: 20px; }
+.audit-lines > div { break-inside: avoid; }
+.audit-heading { column-span: all; font-weight: 600; margin-top: 4px; color: var(--ink); }
+.audit-heading:first-child { margin-top: 0; }
+
+/* ปุ่มลบแบบไอคอนเล็ก ใช้ในประวัติการจัดส่ง */
+.icon-del {
+  width: 24px; height: 24px; display: inline-grid; place-items: center; border: none; border-radius: 6px;
+  background: transparent; color: var(--muted); cursor: pointer; flex: 0 0 auto;
+}
+.icon-del:hover:not(:disabled), .icon-del:focus-visible { background: var(--red-soft); color: var(--red); outline: none; }
+.icon-del:disabled { opacity: .5; cursor: not-allowed; }
+@media (pointer: coarse) { .icon-del { width: 32px; height: 32px; } }
+@media (max-width: 640px) { .file-item { max-width: 100%; } }
 .file-pill b { display: block; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-pill small { display: block; font-size: 11.5px; }
 .file-ico {
@@ -276,3 +356,55 @@ textarea { resize: vertical; min-height: 70px; }
 .kpi.red .bar { background: var(--red); }
 .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
 .mono-sm { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
+
+/* ---------- responsive ---------- */
+/* ปุ่มเปิดเมนูและพื้นหลังมืด ซ่อนไว้บนจอใหญ่ */
+.nav-toggle {
+  display: none; width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line);
+  background: #fff; color: var(--ink); font-size: 18px; line-height: 1; cursor: pointer; flex: 0 0 auto;
+}
+.nav-backdrop { display: none; }
+
+/* แท็บเล็ตและมือถือ เมนูด้านข้างซ่อนไว้ กดปุ่มแล้วเลื่อนออกมา */
+@media (max-width: 1023px) {
+  .nav-toggle { display: inline-grid; place-items: center; }
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 90;
+    transform: translateX(-100%); transition: transform .2s ease;
+    box-shadow: 0 0 40px rgba(10, 25, 45, .35); overflow-y: auto;
+  }
+  .app-shell.nav-open .sidebar { transform: none; }
+  .app-shell.nav-open .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 80; background: rgba(15, 32, 54, .45);
+  }
+  .topbar { padding: 0 16px; }
+  .content { padding: 18px 16px 40px; }
+
+  /* ตารางไม่บีบคอลัมน์ ให้เลื่อนซ้ายขวาในกรอบแทน */
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .table-wrap > table { min-width: 720px; }
+  .table-wrap td { white-space: nowrap; }
+  .scroll-y, .card-body[style*="padding:0"] { overflow-x: auto; }
+
+  /* กล่องที่แบ่งคอลัมน์ไว้ในหน้า ให้เรียงลงมาเป็นแถวเดียว */
+  .grid[style*="grid-template-columns"] { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+/* มือถือ */
+@media (max-width: 640px) {
+  h1 { font-size: 19px; }
+  .topbar { height: 56px; padding: 0 12px; }
+  .topbar .crumb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46vw; }
+  .who-text { display: none; }
+  .content { padding: 14px 12px 32px; }
+  .page-head { align-items: stretch; }
+  .page-head > * { width: 100%; }
+  .filters { flex-direction: column; align-items: stretch; }
+  .filters .field { min-width: 0 !important; width: 100%; flex: none; }
+  .card-head { flex-wrap: wrap; }
+  .kv { grid-template-columns: 110px 1fr; }
+  .modal-backdrop { padding: 10px; }
+  .toast-wrap { left: 12px; right: 12px; }
+  .toast { min-width: 0; }
+  .file-pill { max-width: 100%; }
+}

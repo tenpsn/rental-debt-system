@@ -1,5 +1,5 @@
 import { Routes } from '@angular/router';
-import { authGuard, adminGuard } from './core/auth.guard';
+import { authGuard, adminGuard, auditGuard, editorGuard } from './core/auth.guard';
 import { ShellComponent } from './layout/shell.component';
 
 export const routes: Routes = [
@@ -27,6 +27,7 @@ export const routes: Routes = [
       {
         path: 'contracts/new',
         data: { title: 'สร้างสัญญาใหม่' },
+        canActivate: [editorGuard],
         loadComponent: () => import('./pages/contract-form.component').then((m) => m.ContractFormComponent),
       },
       {
@@ -73,7 +74,7 @@ export const routes: Routes = [
       {
         path: 'audit',
         data: { title: 'บันทึกการใช้งาน' },
-        canActivate: [adminGuard],
+        canActivate: [auditGuard],
         loadComponent: () => import('./pages/audit.component').then((m) => m.AuditComponent),
       },
     ],

@@ -1,11 +1,12 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, DestroyRef, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { ApiService } from '../core/api.service';
 import { AuthService } from '../core/auth.service';
+import { errorMessage } from '../core/auth.interceptor';
 import { Contract, Region, User } from '../core/models';
-import { BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, baht, compactBaht, percent, thaiDate } from '../core/format';
+import { BILLING_CYCLE_LABEL, CONTRACT_STATUS_LABEL, CONTRACT_TYPE_LABEL, CONTRACT_TYPE_TONE, baht, compactBaht, percent, thaiDate } from '../core/format';
 
 @Component({
   selector: 'app-contracts',
@@ -29,20 +30,24 @@ import { BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, baht, compactBaht, percent, t
             <label>ค้นหา</label>
             <input [(ngModel)]="search" (ngModelChange)="debouncedLoad()" placeholder="เลขที่สัญญา หรือชื่อโรงพยาบาล" />
           </div>
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ภาค</label>
-            <select [(ngModel)]="regionId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="regionId" (ngModelChange)="load()">
               <option [ngValue]="null">ทุกภาค</option>
               @for (r of regions(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
             </select>
           </div>
+          }
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ผู้แทน</label>
-            <select [(ngModel)]="repId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="repId" (ngModelChange)="load()">
               <option [ngValue]="null">ทุกคน</option>
               @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
             </select>
           </div>
+          }
           <div class="field">
             <label>ประเภท</label>
             <select [(ngModel)]="status" (ngModelChange)="load()">
@@ -78,10 +83,13 @@ import { BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, baht, compactBaht, percent, t
               <tr class="clickable" [routerLink]="['/contracts', c.id]">
                 <td>
                   <b class="mono">{{ c.contractNo }}</b>
+                  @if (c.status !== 'ACTIVE') {
+                    <span [class]="'chip ' + statusLabel(c.status).tone" style="margin-left:6px">{{ statusLabel(c.status).text }}</span>
+                  }
                   <div class="small muted">{{ c.hospitalName }}</div>
                 </td>
                 <td>
-                  <span class="chip">{{ contractType(c.contractType) }}</span>
+                  <span [class]="'chip ' + contractTypeTone(c.contractType)">{{ contractType(c.contractType) }}</span>
                   <div class="small muted" style="margin-top:3px">{{ c.pricingMode === 'FIXED' ? 'เหมารายงวด' : 'จ่ายตามใช้' }}</div>
                 </td>
                 <td>
@@ -107,7 +115,9 @@ import { BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, baht, compactBaht, percent, t
                 <td>{{ c.repName || '—' }}<div class="small muted">{{ c.regionName }}</div></td>
               </tr>
             } @empty {
-              @if (!loading()) {
+              @if (loadError()) {
+                <tr><td colspan="8" class="empty">โหลดข้อมูลไม่สำเร็จ: {{ loadError() }}</td></tr>
+              } @else if (!loading()) {
                 <tr><td colspan="8" class="empty">ไม่พบสัญญาตามเงื่อนไข</td></tr>
               }
             }
@@ -118,6 +128,8 @@ import { BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, baht, compactBaht, percent, t
   `,
 })
 export class ContractsComponent {
+  // ข้อความเมื่อโหลดรายการไม่สำเร็จ แยกจากกรณีไม่มีข้อมูลจริง
+  readonly loadError = signal('');
   private api = inject(ApiService);
   readonly auth = inject(AuthService);
 
@@ -136,9 +148,13 @@ export class ContractsComponent {
   readonly percent = percent;
   readonly thaiDate = thaiDate;
   readonly contractType = (t: string) => CONTRACT_TYPE_LABEL[t] ?? t;
+  readonly contractTypeTone = (t: string) => CONTRACT_TYPE_TONE[t] ?? '';
+  readonly statusLabel = (s: string) => CONTRACT_STATUS_LABEL[s] ?? { text: s, tone: '' };
   readonly cycle = (c: string) => BILLING_CYCLE_LABEL[c] ?? c;
 
   private timer?: ReturnType<typeof setTimeout>;
+  // ออกจากหน้านี้แล้วยกเลิกการค้นหาที่รออยู่
+  private readonly clearTimer = inject(DestroyRef).onDestroy(() => clearTimeout(this.timer));
 
   constructor() {
     this.api.regions().subscribe((r) => this.regions.set(r));
@@ -153,6 +169,7 @@ export class ContractsComponent {
 
   load() {
     this.loading.set(true);
+    this.loadError.set('');
     this.api
       .contracts({ search: this.search, region_id: this.regionId, rep_id: this.repId, status: this.status })
       .subscribe({
@@ -160,7 +177,10 @@ export class ContractsComponent {
           this.contracts.set(rows);
           this.loading.set(false);
         },
-        error: () => this.loading.set(false),
+        error: (e) => {
+          this.loading.set(false);
+          this.loadError.set(errorMessage(e));
+        },
       });
   }
 }

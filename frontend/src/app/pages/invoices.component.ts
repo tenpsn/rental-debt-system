@@ -4,13 +4,15 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { ApiService } from '../core/api.service';
 import { AuthService } from '../core/auth.service';
+import { errorMessage } from '../core/auth.interceptor';
 import { Hospital, Invoice, User } from '../core/models';
-import { PAYMENT_STATE_LABEL, baht, compactBaht, percent, thaiDate, thaiDateShort } from '../core/format';
+import { PAYMENT_STATE_LABEL, baht, thaiDate, thaiDateShort } from '../core/format';
+import { DateInputComponent } from '../core/date-input.component';
 
 @Component({
   selector: 'app-invoices',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, DateInputComponent],
   template: `
     <div class="page-head">
       <div>
@@ -33,13 +35,15 @@ import { PAYMENT_STATE_LABEL, baht, compactBaht, percent, thaiDate, thaiDateShor
               @for (h of hospitals(); track h.id) { <option [ngValue]="h.id">{{ h.name }}</option> }
             </select>
           </div>
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ผู้แทน</label>
-            <select [(ngModel)]="repId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="repId" (ngModelChange)="load()">
               <option [ngValue]="null">ทั้งหมด</option>
               @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
             </select>
           </div>
+          }
           <div class="field">
             <label>สถานะการชำระ</label>
             <select [(ngModel)]="state" (ngModelChange)="load()">
@@ -52,7 +56,7 @@ import { PAYMENT_STATE_LABEL, baht, compactBaht, percent, thaiDate, thaiDateShor
           </div>
           <div class="field">
             <label>ช่วงวันที่ออก</label>
-            <input type="date" [(ngModel)]="from" (ngModelChange)="load()" />
+            <app-date-input [(ngModel)]="from" (ngModelChange)="load()" />
           </div>
         </div>
       </div>
@@ -107,12 +111,13 @@ import { PAYMENT_STATE_LABEL, baht, compactBaht, percent, thaiDate, thaiDateShor
                   </span>
                   @if (i.attachmentCount) { <div class="small muted">📎 {{ i.attachmentCount }}</div> }
                 </td>
-                <td class="num small" [style.color]="i.daysOverdue > 0 ? 'var(--red)' : 'var(--ink-3)'">
+                <td class="num small" [style.color]="i.daysOverdue > 0 ? 'var(--red)' : 'var(--muted)'">
                   {{ i.daysOverdue > 0 ? i.daysOverdue + ' วัน' : '—' }}
                 </td>
               </tr>
             } @empty {
-              @if (!loading()) { <tr><td colspan="9" class="empty">ไม่พบใบแจ้งหนี้</td></tr> }
+              @if (loadError()) { <tr><td colspan="9" class="empty">โหลดข้อมูลไม่สำเร็จ: {{ loadError() }}</td></tr> }
+              @else if (!loading()) { <tr><td colspan="9" class="empty">ไม่พบใบแจ้งหนี้</td></tr> }
             }
           </tbody>
         </table>
@@ -121,6 +126,8 @@ import { PAYMENT_STATE_LABEL, baht, compactBaht, percent, thaiDate, thaiDateShor
   `,
 })
 export class InvoicesComponent {
+  // ข้อความเมื่อโหลดรายการไม่สำเร็จ แยกจากกรณีไม่มีข้อมูลจริง
+  readonly loadError = signal('');
   private api = inject(ApiService);
   readonly auth = inject(AuthService);
 
@@ -155,12 +162,13 @@ export class InvoicesComponent {
 
   load() {
     this.loading.set(true);
+    this.loadError.set('');
     this.api
       .invoices({
         search: this.search,
         hospital_id: this.hospitalId,
         rep_id: this.repId,
-        payment_state: this.state,
+        state: this.state,
         date_from: this.from,
       })
       .subscribe({
@@ -168,7 +176,10 @@ export class InvoicesComponent {
           this.invoices.set(rows);
           this.loading.set(false);
         },
-        error: () => this.loading.set(false),
+        error: (e) => {
+          this.loading.set(false);
+          this.loadError.set(errorMessage(e));
+        },
       });
   }
 }

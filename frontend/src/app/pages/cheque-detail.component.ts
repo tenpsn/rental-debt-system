@@ -1,4 +1,5 @@
 import { Component, OnInit, inject, input, signal } from '@angular/core';
+import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
@@ -9,7 +10,7 @@ import { errorMessage } from '../core/auth.interceptor';
 import { ChequeDetail } from '../core/models';
 import {
   CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, PAYMENT_STATE_LABEL,
-  baht, fileSize, thaiDate, thaiDateShort, thaiDateTime,
+  baht, fileIcon, fileSize, thaiDate, thaiDateShort, thaiDateTime,
 } from '../core/format';
 
 @Component({
@@ -33,7 +34,7 @@ import {
               <option value="BOUNCED">เช็คเด้ง</option>
               <option value="RETURNED">คืนเช็ค</option>
             </select>
-            <button class="btn primary" (click)="updateStatus()">อัปเดตสถานะ</button>
+            <button class="btn primary" (click)="updateStatus()" [disabled]="busy()">อัปเดตสถานะ</button>
           </div>
         }
       </div>
@@ -85,7 +86,7 @@ import {
                     <td class="small">{{ thaiDateShort(a.dueDate) }}</td>
                     <td class="num">{{ baht(a.invoiceTotal) }}</td>
                     <td class="num"><b>{{ baht(a.amount) }}</b></td>
-                    <td><span class="chip" [class.green]="a.paymentState === 'PAID'">{{ paymentState(a.paymentState) }}</span></td>
+                    <td><span [class]="'chip ' + paymentTone(a.paymentState)">{{ paymentState(a.paymentState) }}</span></td>
                   </tr>
                 } @empty {
                   <tr><td colspan="6" class="empty small">เช็คนี้ยังไม่ถูกตัดชำระใบแจ้งหนี้ใด</td></tr>
@@ -122,13 +123,21 @@ import {
             <div class="card-body">
               <div class="file-list">
                 @for (f of c.attachments; track f.id) {
-                  <a class="file-pill" [href]="link(f.id)" target="_blank" rel="noopener">
-                    <span class="file-ico">IMG</span>
-                    <span>
-                      <b>{{ f.fileName }}</b>
-                      <small class="muted">{{ fileSize(f.sizeBytes) }} · {{ thaiDateTime(f.createdAt) }}</small>
-                    </span>
-                  </a>
+                  <div class="file-item">
+                    <a class="file-pill" href="#" [title]="f.fileName" (click)="openFile($event, f.id)">
+                      <span class="file-ico">{{ fileIcon(f.mimeType) }}</span>
+                      <span>
+                        <b>{{ f.fileName }}</b>
+                        <small class="muted">{{ fileSize(f.sizeBytes) }} · {{ thaiDateTime(f.createdAt) }}</small>
+                      </span>
+                    </a>
+                    @if (auth.canDeleteAttachment()) {
+                      <button type="button" class="file-del" title="ลบไฟล์" [attr.aria-label]="'ลบไฟล์ ' + f.fileName"
+                              [disabled]="deletingFile()" (click)="deleteFile(f.id, f.fileName)">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" /></svg>
+                      </button>
+                    }
+                  </div>
                 } @empty {
                   <div class="small muted">ยังไม่มีไฟล์ scan เช็ค</div>
                 }
@@ -138,11 +147,24 @@ import {
         </div>
       </div>
     } @else {
-      <div class="card"><div class="empty">กำลังโหลด…</div></div>
+      @if (loadError()) {
+        <div class="card"><div class="empty">
+          <div style="margin-bottom:10px">โหลดข้อมูลไม่สำเร็จ: {{ loadError() }}</div>
+          <a routerLink="/cheques">← กลับไปรายการเช็ค</a>
+        </div></div>
+      } @else {
+        <div class="card"><div class="empty">กำลังโหลด…</div></div>
+      }
     }
   `,
 })
 export class ChequeDetailComponent implements OnInit {
+  // กันกดลบไฟล์ซ้ำระหว่างรอผล
+  readonly deletingFile = signal(false);
+  // ข้อความเมื่อโหลดข้อมูลหลักของหน้าไม่สำเร็จ
+  readonly loadError = signal('');
+  // กันกดปุ่มบันทึกซ้ำระหว่างรอผล
+  readonly busy = signal(false);
   readonly id = input.required<string>();
 
   private api = inject(ApiService);
@@ -157,9 +179,11 @@ export class ChequeDetailComponent implements OnInit {
   readonly thaiDateShort = thaiDateShort;
   readonly thaiDateTime = thaiDateTime;
   readonly fileSize = fileSize;
+  readonly fileIcon = fileIcon;
   readonly statusLabel = (s: string) => CHEQUE_STATUS_LABEL[s]?.text ?? s;
   readonly deliveryLabel = (m: string) => CHEQUE_DELIVERY_LABEL[m] ?? m;
   readonly paymentState = (s: string) => PAYMENT_STATE_LABEL[s]?.text ?? s;
+  readonly paymentTone = (s: string) => PAYMENT_STATE_LABEL[s]?.tone ?? '';
 
   ngOnInit() {
     this.load();
@@ -171,16 +195,34 @@ export class ChequeDetailComponent implements OnInit {
         this.ch.set(c);
         this.newStatus = c.status;
       },
+      error: (e) => this.loadError.set(errorMessage(e)),
+    });
+  }
+
+  // เปิดไฟล์แนบในแท็บใหม่ ถ้าเปิดไม่ได้ให้แจ้งผู้ใช้
+  // ลบไฟล์แนบ ถามยืนยันก่อนเพราะลบแล้วกู้คืนไม่ได้
+  deleteFile(attachmentId: string, fileName: string) {
+    if (this.deletingFile()) return;
+    if (!confirm(`ลบไฟล์ "${fileName}" หรือไม่ ลบแล้วกู้คืนไม่ได้`)) return;
+    this.deletingFile.set(true);
+    this.api.deleteAttachment(attachmentId).pipe(finalize(() => this.deletingFile.set(false))).subscribe({
+      next: () => {
+        this.toast.success('ลบไฟล์แล้ว');
+        this.load();
+      },
       error: (e) => this.toast.error(errorMessage(e)),
     });
   }
 
-  link(attachmentId: string) {
-    return `/api/attachments/${attachmentId}/download?inline=true&token=${this.auth.token()}`;
+  openFile(event: Event, attachmentId: string) {
+    event.preventDefault();
+    this.api.openAttachment(attachmentId).subscribe();
   }
 
   updateStatus() {
-    this.api.updateCheque(this.id(), { status: this.newStatus }).subscribe({
+    if (this.busy()) return;
+    this.busy.set(true);
+    this.api.updateCheque(this.id(), { status: this.newStatus }).pipe(finalize(() => this.busy.set(false))).subscribe({
       next: () => {
         this.toast.success('อัปเดตสถานะเช็คแล้ว');
         this.load();
@@ -193,10 +235,11 @@ export class ChequeDetailComponent implements OnInit {
     const input = ev.target as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
+    // ล้างช่องเลือกไฟล์ทันที ไม่ว่าอัปโหลดสำเร็จหรือไม่ จะได้เลือกไฟล์เดิมซ้ำได้
+    input.value = '';
     this.api.uploadAttachment('CHEQUE', chequeId, file).subscribe({
       next: () => {
         this.toast.success('อัปโหลดไฟล์แล้ว');
-        input.value = '';
         this.load();
       },
       error: (e) => this.toast.error(errorMessage(e)),

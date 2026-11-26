@@ -6,14 +6,15 @@ import { ApiService } from '../core/api.service';
 import { ToastService } from '../core/toast.service';
 import { errorMessage } from '../core/auth.interceptor';
 import { Hospital } from '../core/models';
-import { baht, money, thaiDate } from '../core/format';
+import { baht, thaiDate } from '../core/format';
+import { DateInputComponent } from '../core/date-input.component';
 
 type EquipmentRow = { name: string; model: string; serialNo: string; qty: number };
 
 @Component({
   selector: 'app-contract-form',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, DateInputComponent],
   template: `
     <div class="page-head">
       <div>
@@ -53,11 +54,11 @@ type EquipmentRow = { name: string; model: string; serialNo: string; qty: number
             </div>
             <div class="field">
               <label>วันเริ่มสัญญา *</label>
-              <input type="date" [(ngModel)]="form.startDate" (ngModelChange)="refreshPreview()" />
+              <app-date-input [(ngModel)]="form.startDate" (ngModelChange)="refreshPreview()" />
             </div>
             <div class="field">
               <label>วันสิ้นสุดสัญญา *</label>
-              <input type="date" [(ngModel)]="form.endDate" (ngModelChange)="refreshPreview()" />
+              <app-date-input [(ngModel)]="form.endDate" (ngModelChange)="refreshPreview()" />
             </div>
           </div>
 
@@ -119,7 +120,7 @@ type EquipmentRow = { name: string; model: string; serialNo: string; qty: number
 
           <div>
             <div class="row between" style="margin-bottom:8px">
-              <label style="font-size:13px;font-weight:600;color:var(--ink-2)">เครื่องที่ให้เช่า</label>
+              <label style="font-size:13px;font-weight:600;color:var(--ink)">เครื่องที่ให้เช่า</label>
               <button class="btn sm" (click)="addEquipment()">+ เพิ่มรายการ</button>
             </div>
             @for (e of equipment(); track $index) {
@@ -248,6 +249,18 @@ export class ContractFormComponent {
   save() {
     if (!this.form.hospitalId || !this.form.contractNo || !this.form.startDate || !this.form.endDate) {
       this.toast.error('กรอกข้อมูลที่จำเป็นให้ครบก่อนบันทึก');
+      return;
+    }
+    if (this.form.endDate < this.form.startDate) {
+      this.toast.error('วันสิ้นสุดสัญญาต้องไม่อยู่ก่อนวันเริ่มสัญญา');
+      return;
+    }
+    if (this.form.pricingMode === 'FIXED' && !(Number(this.form.periodAmount) > 0)) {
+      this.toast.error('กรอกค่าเช่าต่องวดให้มากกว่า 0');
+      return;
+    }
+    if (this.form.pricingMode === 'PAY_PER_USE' && !(Number(this.form.unitPrice) > 0)) {
+      this.toast.error('กรอกราคาต่อหน่วยให้มากกว่า 0');
       return;
     }
     const body: Record<string, unknown> = {

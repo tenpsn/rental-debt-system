@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ApiError } from '../lib/errors.js';
-import { parse } from '../lib/validate.js';
-import { authorize } from '../middleware/auth.js';
+import { clampLimit, dateStr, nonNegativeMoney, parse, positiveMoney } from '../lib/validate.js';
+import { assertRepAccess, authorize } from '../middleware/auth.js';
 import { audit } from '../lib/audit.js';
 
-const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'รูปแบบวันที่ต้องเป็น YYYY-MM-DD');
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
 
 const createSchema = z.object({
@@ -14,8 +13,8 @@ const createSchema = z.object({
   invoiceNo: z.string().optional().nullable(),
   issueDate: dateStr,
   dueDate: dateStr.optional().nullable(),
-  amount: z.number().nonnegative().optional().nullable(),
-  usageQty: z.number().nonnegative().optional().nullable(),
+  amount: nonNegativeMoney.optional().nullable(),
+  usageQty: z.number().nonnegative().max(10_000_000).optional().nullable(),
   note: z.string().optional().nullable(),
 });
 
@@ -66,6 +65,13 @@ async function nextInvoiceNo(client, issueDate) {
   const { rows } = await client.query("SELECT nextval('invoice_no_seq') AS n");
   const ym = String(issueDate).slice(0, 7).replace('-', '');
   return `INV-${ym}-${String(rows[0].n).padStart(4, '0')}`;
+}
+
+// วันครบกำหนดที่กรอกเอง ต้องไม่อยู่ก่อนวันออกใบแจ้งหนี้
+function assertDueAfterIssue(b) {
+  if (b.dueDate && b.dueDate < b.issueDate) {
+    throw ApiError.badRequest('วันครบกำหนดต้องไม่อยู่ก่อนวันออกใบแจ้งหนี้');
+  }
 }
 
 export default function invoiceRoutes(db) {
@@ -127,6 +133,7 @@ export default function invoiceRoutes(db) {
   router.get(
     '/:id',
     asyncHandler(async (req, res) => {
+      await assertRepAccess(db, req.user, 'INVOICE', req.params.id);
       const { rows } = await db.query('SELECT * FROM v_invoice_receivable WHERE id = $1', [req.params.id]);
       const inv = rows[0];
       if (!inv) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
@@ -197,6 +204,7 @@ export default function invoiceRoutes(db) {
     authorize('ADMIN', 'ACCOUNTING', 'MANAGER'),
     asyncHandler(async (req, res) => {
       const b = parse(createSchema, req.body);
+      assertDueAfterIssue(b);
 
       const created = await db.tx(async (client) => {
         const { rows } = await client.query(
@@ -270,6 +278,7 @@ export default function invoiceRoutes(db) {
         z.object({ periodIds: z.array(z.string().uuid()).min(1), issueDate: dateStr, dueDate: dateStr.optional().nullable() }),
         req.body,
       );
+      assertDueAfterIssue(b);
 
       const created = await db.tx(async (client) => {
         const out = [];
@@ -305,13 +314,31 @@ export default function invoiceRoutes(db) {
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'ISSUED',$10) RETURNING id, invoice_no`,
             [invoiceNo, row.hospital_id, row.cid, periodId, b.issueDate, dueDate, amount, vat, total, req.user.id],
           );
-          out.push({ periodId, id: ins.rows[0].id, invoiceNo: ins.rows[0].invoice_no });
+          out.push({
+            periodId, id: ins.rows[0].id, invoiceNo: ins.rows[0].invoice_no,
+            contractNo: row.contract_no, periodNo: row.period_no, amount, vat, total, dueDate,
+          });
         }
         return out;
       });
 
-      await audit(db, req, { action: 'BULK_CREATE', entityType: 'INVOICE', payload: { count: created.length } });
-      res.status(201).json({ createdCount: created.length, invoices: created });
+      // บันทึกให้รู้ว่าออกใบไหนบ้าง ของสัญญาและงวดไหน ยอดเท่าไร
+      await audit(db, req, {
+        action: 'BULK_CREATE',
+        entityType: 'INVOICE',
+        payload: {
+          count: created.length,
+          issueDate: b.issueDate,
+          totalAmount: round2(created.reduce((sum, inv) => sum + inv.total, 0)),
+          invoices: created.map(({ invoiceNo, contractNo, periodNo, amount, vat, total, dueDate }) => ({
+            invoiceNo, contractNo, periodNo, amount, vat, total, dueDate,
+          })),
+        },
+      });
+      res.status(201).json({
+        createdCount: created.length,
+        invoices: created.map(({ periodId, id, invoiceNo }) => ({ periodId, id, invoiceNo })),
+      });
     }),
   );
 
@@ -323,20 +350,66 @@ export default function invoiceRoutes(db) {
         z.object({
           dueDate: dateStr.optional(),
           note: z.string().optional().nullable(),
-          usageQty: z.number().nonnegative().optional(),
+          usageQty: z.number().nonnegative().max(10_000_000).optional(),
         }),
         req.body,
       );
-      const sets = [];
-      const params = [];
-      if (b.dueDate) { params.push(b.dueDate); sets.push(`due_date = $${params.length}`); }
-      if (b.note !== undefined) { params.push(b.note); sets.push(`note = $${params.length}`); }
-      if (b.usageQty !== undefined) { params.push(b.usageQty); sets.push(`usage_qty = $${params.length}`); }
-      if (!sets.length) throw ApiError.badRequest('ไม่มีข้อมูลที่จะแก้ไข');
-      params.push(req.params.id);
-      const { rowCount } = await db.query(`UPDATE invoices SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
-      if (!rowCount) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
-      await audit(db, req, { action: 'UPDATE', entityType: 'INVOICE', entityId: req.params.id, payload: b });
+      if (b.dueDate === undefined && b.note === undefined && b.usageQty === undefined) {
+        throw ApiError.badRequest('ไม่มีข้อมูลที่จะแก้ไข');
+      }
+
+      const result = await db.tx(async (client) => {
+        // ล็อกใบแจ้งหนี้ไว้ระหว่างแก้ ไม่ให้มีการตัดชำระแทรกเข้ามาพร้อมกัน
+        const { rows } = await client.query(
+          `SELECT i.*, c.pricing_mode, c.unit_price, c.vat_rate,
+                  (SELECT COALESCE(SUM(amount), 0) FROM cheque_allocations a WHERE a.invoice_id = i.id) AS allocated
+             FROM invoices i JOIN contracts c ON c.id = i.contract_id
+            WHERE i.id = $1 FOR UPDATE OF i`,
+          [req.params.id],
+        );
+        const inv = rows[0];
+        if (!inv) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
+        if (inv.status === 'CANCELLED') throw ApiError.conflict('ใบแจ้งหนี้นี้ถูกยกเลิกแล้ว แก้ไขไม่ได้');
+        if (b.dueDate && b.dueDate < inv.issue_date) {
+          throw ApiError.badRequest('วันครบกำหนดต้องไม่อยู่ก่อนวันออกใบแจ้งหนี้');
+        }
+
+        const sets = [];
+        const params = [];
+        if (b.dueDate) { params.push(b.dueDate); sets.push(`due_date = $${params.length}`); }
+        if (b.note !== undefined) { params.push(b.note); sets.push(`note = $${params.length}`); }
+
+        // แก้จำนวนที่ใช้ ต้องคำนวณยอดเงิน VAT และยอดรวมใหม่ให้ตรงกันเสมอ
+        let money = null;
+        if (b.usageQty !== undefined) {
+          if (inv.pricing_mode !== 'PAY_PER_USE') {
+            throw ApiError.badRequest('แก้จำนวนที่ใช้ได้เฉพาะสัญญาแบบจ่ายตามใช้');
+          }
+          if (Number(inv.allocated) > 0) {
+            throw ApiError.conflict('ใบแจ้งหนี้นี้มีการตัดชำระแล้ว แก้จำนวนที่ใช้ไม่ได้');
+          }
+          const amount = round2(Number(inv.unit_price) * b.usageQty);
+          const vat = round2((amount * Number(inv.vat_rate)) / 100);
+          money = { amount, vat, total: round2(amount + vat) };
+          params.push(b.usageQty); sets.push(`usage_qty = $${params.length}`);
+          params.push(money.amount); sets.push(`amount = $${params.length}`);
+          params.push(money.vat); sets.push(`vat_amount = $${params.length}`);
+          params.push(money.total); sets.push(`total_amount = $${params.length}`);
+        }
+
+        params.push(req.params.id);
+        await client.query(`UPDATE invoices SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
+        return {
+          before: {
+            dueDate: inv.due_date, note: inv.note, usageQty: inv.usage_qty,
+            amount: Number(inv.amount), vat: Number(inv.vat_amount), total: Number(inv.total_amount),
+          },
+          after: { ...b, ...(money ?? {}) },
+          invoiceNo: inv.invoice_no,
+        };
+      });
+
+      await audit(db, req, { action: 'UPDATE', entityType: 'INVOICE', entityId: req.params.id, payload: result });
       res.json({ ok: true });
     }),
   );
@@ -350,12 +423,23 @@ export default function invoiceRoutes(db) {
         [req.params.id],
       );
       if (Number(rows[0].paid) > 0) throw ApiError.conflict('ใบแจ้งหนี้นี้มีการตัดชำระแล้ว ยกเลิกไม่ได้');
+      // ยกเลิกเฉพาะใบที่ยังไม่ถูกยกเลิก ใบที่ยกเลิกไปแล้วจะไม่ถูกต่อท้ายหมายเหตุซ้ำ
       const upd = await db.query(
-        `UPDATE invoices SET status = 'CANCELLED', note = COALESCE(note,'') || ' [ยกเลิก]' WHERE id = $1 RETURNING invoice_no`,
+        `UPDATE invoices SET status = 'CANCELLED', note = COALESCE(note,'') || ' [ยกเลิก]'
+          WHERE id = $1 AND status <> 'CANCELLED' RETURNING invoice_no, total_amount`,
         [req.params.id],
       );
-      if (!upd.rowCount) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
-      await audit(db, req, { action: 'CANCEL', entityType: 'INVOICE', entityId: req.params.id });
+      if (!upd.rowCount) {
+        const exists = await db.query('SELECT 1 FROM invoices WHERE id = $1', [req.params.id]);
+        if (!exists.rowCount) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
+        throw ApiError.conflict('ใบแจ้งหนี้นี้ถูกยกเลิกไปแล้ว');
+      }
+      await audit(db, req, {
+        action: 'CANCEL',
+        entityType: 'INVOICE',
+        entityId: req.params.id,
+        payload: { invoiceNo: upd.rows[0].invoice_no, total: upd.rows[0].total_amount },
+      });
       res.json({ ok: true });
     }),
   );
@@ -365,6 +449,7 @@ export default function invoiceRoutes(db) {
     '/:id/deliveries',
     authorize('ADMIN', 'ACCOUNTING', 'MANAGER', 'REP'),
     asyncHandler(async (req, res) => {
+      await assertRepAccess(db, req.user, 'INVOICE', req.params.id);
       const b = parse(deliverySchema, req.body);
       const { rowCount } = await db.query('SELECT 1 FROM invoices WHERE id = $1', [req.params.id]);
       if (!rowCount) throw ApiError.notFound('ไม่พบใบแจ้งหนี้');
@@ -390,14 +475,17 @@ export default function invoiceRoutes(db) {
     '/:invoiceId/deliveries/:deliveryId',
     authorize('ADMIN', 'MANAGER'),
     asyncHandler(async (req, res) => {
-      await db.query('DELETE FROM invoice_deliveries WHERE id = $1 AND invoice_id = $2', [
-        req.params.deliveryId,
-        req.params.invoiceId,
-      ]);
+      // บันทึกการใช้งานเฉพาะเมื่อลบได้จริง และเก็บรายละเอียดที่ถูกลบไว้
+      const { rows } = await db.query(
+        'DELETE FROM invoice_deliveries WHERE id = $1 AND invoice_id = $2 RETURNING *',
+        [req.params.deliveryId, req.params.invoiceId],
+      );
+      if (!rows.length) throw ApiError.notFound('ไม่พบประวัติการจัดส่ง');
       await audit(db, req, {
         action: 'DELETE',
         entityType: 'INVOICE_DELIVERY',
         entityId: req.params.deliveryId,
+        payload: { invoiceId: req.params.invoiceId, deleted: rows[0] },
       });
       res.json({ ok: true });
     }),

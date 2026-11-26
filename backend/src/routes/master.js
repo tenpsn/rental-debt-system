@@ -158,7 +158,14 @@ export default function masterRoutes(db) {
   // ---------- users ----------
   router.get(
     '/users',
-    asyncHandler(async (_req, res) => {
+    asyncHandler(async (req, res) => {
+      // คนที่ไม่ใช่ผู้ดูแลระบบ เห็นแค่ชื่อและตำแหน่ง ไว้ใช้กรองตามผู้แทน
+      if (req.user.role !== 'ADMIN') {
+        const { rows } = await db.query(
+          `SELECT id, full_name, role, region_id FROM users WHERE is_active ORDER BY role, full_name`,
+        );
+        return res.json(rows.map((u) => ({ id: u.id, fullName: u.full_name, role: u.role, regionId: u.region_id })));
+      }
       const { rows } = await db.query(
         `SELECT u.id, u.email, u.full_name, u.role, u.region_id, u.phone, u.is_active, u.last_login_at,
                 r.name AS region_name,
@@ -216,6 +223,8 @@ export default function masterRoutes(db) {
       if (b.password) {
         params.push(await bcrypt.hash(b.password, 10));
         sets.push(`password_hash = $${params.length}`);
+        // ผู้ดูแลตั้งรหัสใหม่ให้ token เดิมของผู้ใช้นั้นใช้ไม่ได้ทันที
+        sets.push(`password_changed_at = date_trunc('second', now())`);
       }
       if (!sets.length) throw ApiError.badRequest('ไม่มีข้อมูลที่จะแก้ไข');
       params.push(req.params.id);

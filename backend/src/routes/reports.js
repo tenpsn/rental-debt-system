@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { asyncHandler } from '../lib/errors.js';
+import { clampLimit } from '../lib/validate.js';
 import { authorize } from '../middleware/auth.js';
 import { createReportsService } from '../services/reports.js';
 
@@ -71,7 +72,7 @@ export default function reportRoutes(db) {
         params.push(`%${req.query.search}%`);
         where.push(`(actor_email ILIKE $${params.length} OR entity_id ILIKE $${params.length})`);
       }
-      params.push(Number(req.query.limit || 200));
+      params.push(clampLimit(req.query.limit, 200));
       const { rows } = await db.query(
         `SELECT id, actor_email, action, entity_type, entity_id, payload, ip_address, created_at
            FROM audit_logs WHERE ${where.join(' AND ')}

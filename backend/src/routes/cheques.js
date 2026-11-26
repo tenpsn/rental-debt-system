@@ -1,18 +1,17 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ApiError } from '../lib/errors.js';
-import { parse } from '../lib/validate.js';
-import { authorize } from '../middleware/auth.js';
+import { clampLimit, dateStr, nonNegativeMoney, parse, positiveMoney } from '../lib/validate.js';
+import { assertRepAccess, authorize } from '../middleware/auth.js';
 import { audit } from '../lib/audit.js';
 
-const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'รูปแบบวันที่ต้องเป็น YYYY-MM-DD');
 const round2 = (v) => Math.round(Number(v) * 100) / 100;
 
 const createSchema = z.object({
   chequeNo: z.string().min(1, 'กรุณากรอกเลขที่เช็ค'),
   bankName: z.string().min(1, 'กรุณากรอกธนาคาร'),
   bankBranch: z.string().optional().nullable(),
-  amount: z.number().positive('จำนวนเงินต้องมากกว่า 0'),
+  amount: positiveMoney,
   chequeDate: dateStr,
   receivedDate: dateStr,
   receivedBy: z.string().uuid().optional().nullable(),
@@ -21,7 +20,7 @@ const createSchema = z.object({
   companyReceivedDate: dateStr.optional().nullable(),
   note: z.string().optional().nullable(),
   allocations: z
-    .array(z.object({ invoiceId: z.string().uuid(), amount: z.number().positive() }))
+    .array(z.object({ invoiceId: z.string().uuid(), amount: positiveMoney }))
     .default([]),
 });
 
@@ -113,6 +112,7 @@ export default function chequeRoutes(db) {
   router.get(
     '/:id',
     asyncHandler(async (req, res) => {
+      await assertRepAccess(db, req.user, 'CHEQUE', req.params.id);
       const { rows } = await db.query(
         `SELECT ch.*, h.name AS hospital_name, u.full_name AS received_by_name, rp.full_name AS rep_name,
                 COALESCE(a.allocated_amount, 0) AS allocated_amount
@@ -187,13 +187,19 @@ export default function chequeRoutes(db) {
           throw ApiError.badRequest('ยอดตัดชำระรวมมากกว่ายอดเช็ค');
         }
 
+        const allocationDetails = [];
         for (const a of b.allocations) {
           const inv = await client.query(
-            `SELECT v.id, v.hospital_id, v.outstanding_amount FROM v_invoice_receivable v
+            `SELECT v.id, v.invoice_no, v.hospital_id, v.outstanding_amount FROM v_invoice_receivable v
               WHERE v.id = $1 AND v.status <> 'CANCELLED'`,
             [a.invoiceId],
           );
           if (!inv.rowCount) throw ApiError.badRequest(`ไม่พบใบแจ้งหนี้ ${a.invoiceId}`);
+          allocationDetails.push({
+            invoiceNo: inv.rows[0].invoice_no,
+            amount: round2(a.amount),
+            outstandingBefore: round2(inv.rows[0].outstanding_amount),
+          });
           if (inv.rows[0].hospital_id !== b.hospitalId) {
             throw ApiError.badRequest('ใบแจ้งหนี้ไม่ได้เป็นของโรงพยาบาลเดียวกับเช็ค');
           }
@@ -202,12 +208,14 @@ export default function chequeRoutes(db) {
           }
         }
 
+        // ผู้แทนบันทึกได้เฉพาะเช็คที่ตัวเองเป็นคนรับ คนอื่นระบุผู้รับได้
+        const receivedBy = req.user.role === 'REP' ? req.user.id : b.receivedBy || req.user.id;
         const ins = await client.query(
           `INSERT INTO cheques (cheque_no, bank_name, bank_branch, amount, cheque_date, received_date,
                                received_by, hospital_id, delivery_method, company_received_date, note)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
           [b.chequeNo, b.bankName, b.bankBranch ?? null, b.amount, b.chequeDate, b.receivedDate,
-           b.receivedBy || req.user.id, b.hospitalId, b.deliveryMethod, b.companyReceivedDate ?? null, b.note ?? null],
+           receivedBy, b.hospitalId, b.deliveryMethod, b.companyReceivedDate ?? null, b.note ?? null],
         );
         const cheque = ins.rows[0];
 
@@ -218,16 +226,25 @@ export default function chequeRoutes(db) {
             a.amount,
           ]);
         }
-        return cheque;
+        return { cheque, allocationDetails };
       });
 
+      // บันทึกให้รู้ว่าเช็คใบนี้ตัดชำระใบแจ้งหนี้ใบไหน ใบละเท่าไร
       await audit(db, req, {
         action: 'CREATE',
         entityType: 'CHEQUE',
-        entityId: created.id,
-        payload: { chequeNo: b.chequeNo, amount: b.amount, hospitalId: b.hospitalId, allocations: b.allocations.length },
+        entityId: created.cheque.id,
+        payload: {
+          chequeNo: b.chequeNo,
+          bankName: b.bankName,
+          amount: b.amount,
+          chequeDate: b.chequeDate,
+          hospitalId: b.hospitalId,
+          allocatedTotal: round2(created.allocationDetails.reduce((sum, a) => sum + a.amount, 0)),
+          allocations: created.allocationDetails,
+        },
       });
-      res.status(201).json({ id: created.id });
+      res.status(201).json({ id: created.cheque.id });
     }),
   );
 
@@ -249,10 +266,26 @@ export default function chequeRoutes(db) {
       if (b.companyReceivedDate !== undefined) { params.push(b.companyReceivedDate); sets.push(`company_received_date = $${params.length}`); }
       if (b.note !== undefined) { params.push(b.note); sets.push(`note = $${params.length}`); }
       if (!sets.length) throw ApiError.badRequest('ไม่มีข้อมูลที่จะแก้ไข');
+      // เก็บค่าเดิมไว้ เพื่อบันทึกว่าเปลี่ยนจากอะไรเป็นอะไร
+      const before = await db.query(
+        'SELECT cheque_no, status, company_received_date, note FROM cheques WHERE id = $1',
+        [req.params.id],
+      );
+      if (!before.rowCount) throw ApiError.notFound('ไม่พบเช็ค');
       params.push(req.params.id);
       const { rowCount } = await db.query(`UPDATE cheques SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
       if (!rowCount) throw ApiError.notFound('ไม่พบเช็ค');
-      await audit(db, req, { action: 'UPDATE', entityType: 'CHEQUE', entityId: req.params.id, payload: b });
+      const old = before.rows[0];
+      await audit(db, req, {
+        action: 'UPDATE',
+        entityType: 'CHEQUE',
+        entityId: req.params.id,
+        payload: {
+          chequeNo: old.cheque_no,
+          before: { status: old.status, companyReceivedDate: old.company_received_date, note: old.note },
+          after: b,
+        },
+      });
       res.json({ ok: true });
     }),
   );

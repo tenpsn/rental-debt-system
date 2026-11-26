@@ -10,6 +10,9 @@
  * - อายุหนี้ (aging) นับจาก due_date ของใบแจ้งหนี้ ถึงวันปัจจุบัน
  */
 
+import { todayIso } from '../lib/dates.js';
+import { clampLimit } from '../lib/validate.js';
+
 const num = (v) => (v === null || v === undefined ? 0 : Number(v));
 const round2 = (v) => Math.round(num(v) * 100) / 100;
 
@@ -39,7 +42,8 @@ function dateClause(p, column, { dateFrom, dateTo } = {}) {
   return parts.length ? ` AND ${parts.join(' AND ')}` : '';
 }
 
-const PERIODS_CTE = `
+// งวดสัญญา ณ วันที่เลือก งวดที่ออกใบแจ้งหนี้หลังวันนั้น ถือว่ายังไม่ได้แจ้งหนี้
+const periodsCte = (asOfRef) => `
   base AS (
     SELECT cp.id, cp.contract_id, cp.period_no, cp.period_start, cp.period_end, cp.due_date,
            cp.expected_amount, c.pricing_mode, c.period_amount,
@@ -50,7 +54,7 @@ const PERIODS_CTE = `
       JOIN hospitals h ON h.id = c.hospital_id
       LEFT JOIN LATERAL (
              SELECT i.id AS invoice_id FROM invoices i
-              WHERE i.period_id = cp.id AND i.status <> 'CANCELLED'
+              WHERE i.period_id = cp.id AND i.status <> 'CANCELLED' AND i.issue_date <= ${asOfRef}::date
               LIMIT 1
            ) inv ON TRUE
       LEFT JOIN LATERAL (
@@ -60,14 +64,53 @@ const PERIODS_CTE = `
      WHERE c.status <> 'CANCELLED'
 `;
 
+// ใบแจ้งหนี้ ณ วันที่เลือก ใช้แทน v_invoice_receivable ในรายงาน ตัวเลขทุกตัวจะได้อิงวันเดียวกัน
+// นับเฉพาะใบที่ออกภายในวันนั้น เช็คที่รับภายในวันนั้น การส่งภายในวันนั้น และอายุหนี้นับถึงวันนั้น
+// สถานะเงินเข้าใช้สถานะปัจจุบันของเช็ค เพราะระบบไม่ได้เก็บประวัติวันที่เปลี่ยนสถานะ
+function invoicesAsOfCte(asOfRef) {
+  return `inv AS (
+    SELECT i.id, i.invoice_no, i.hospital_id, i.contract_id, i.period_id,
+           i.issue_date, i.due_date, i.amount, i.total_amount, i.status,
+           COALESCE(paid.allocated, 0)::numeric(14,2) AS cheque_received_amount,
+           COALESCE(paid.cleared, 0)::numeric(14,2) AS cleared_amount,
+           (i.total_amount - COALESCE(paid.allocated, 0))::numeric(14,2) AS outstanding_amount,
+           deliv.last_delivered_on,
+           COALESCE(att.n, 0) AS attachment_count,
+           GREATEST(${asOfRef}::date - i.due_date, 0) AS days_overdue,
+           CASE
+             WHEN i.status = 'CANCELLED' THEN 'CANCELLED'
+             WHEN COALESCE(paid.allocated, 0) >= i.total_amount THEN 'PAID'
+             WHEN COALESCE(paid.allocated, 0) > 0 THEN 'PARTIAL'
+             WHEN deliv.last_delivered_on IS NOT NULL THEN 'SENT'
+             ELSE 'NOT_SENT'
+           END AS payment_state
+      FROM invoices i
+      LEFT JOIN LATERAL (
+        SELECT SUM(a.amount) AS allocated,
+               SUM(CASE WHEN ch.status = 'CLEARED' THEN a.amount ELSE 0 END) AS cleared
+          FROM cheque_allocations a JOIN cheques ch ON ch.id = a.cheque_id
+         WHERE a.invoice_id = i.id AND ch.status NOT IN ('BOUNCED', 'RETURNED')
+           AND ch.received_date <= ${asOfRef}::date
+      ) paid ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT MAX(d.delivered_on) AS last_delivered_on FROM invoice_deliveries d
+         WHERE d.invoice_id = i.id AND d.status <> 'RETURNED' AND d.delivered_on <= ${asOfRef}::date
+      ) deliv ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS n FROM attachments at WHERE at.entity_type = 'INVOICE' AND at.entity_id = i.id
+      ) att ON TRUE
+     WHERE i.issue_date <= ${asOfRef}::date
+  )`;
+}
+
 export function createReportsService(db) {
   async function periodMetrics(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
-    const asOf = p.add(filters.asOf || new Date().toISOString().slice(0, 10));
+    const asOf = p.add(filters.asOf || todayIso());
 
     const sql = `
-      WITH ${PERIODS_CTE} ${filter}
+      WITH ${periodsCte(asOf)} ${filter}
       )
       SELECT
         COUNT(*)::int                                                              AS total_periods,
@@ -96,8 +139,10 @@ export function createReportsService(db) {
     const p = new Params();
     const filter = scopeClause(p, filters);
     const dates = dateClause(p, 'v.issue_date', filters);
+    const asOf = p.add(filters.asOf || todayIso());
 
     const sql = `
+      WITH ${invoicesAsOfCte(asOf)}
       SELECT
         COUNT(*) FILTER (WHERE v.status <> 'CANCELLED')::int AS invoice_count,
         COALESCE(SUM(v.total_amount) FILTER (WHERE v.status <> 'CANCELLED'), 0) AS invoice_amount,
@@ -113,7 +158,7 @@ export function createReportsService(db) {
         COUNT(*) FILTER (WHERE v.status <> 'CANCELLED' AND v.days_overdue > 0 AND v.outstanding_amount > 0)::int AS overdue_count,
         COALESCE(SUM(v.outstanding_amount) FILTER (WHERE v.status <> 'CANCELLED' AND v.days_overdue > 0), 0) AS overdue_amount,
         COUNT(*) FILTER (WHERE v.status <> 'CANCELLED' AND v.attachment_count = 0)::int AS invoices_without_file
-      FROM v_invoice_receivable v
+      FROM inv v
       JOIN hospitals h ON h.id = v.hospital_id
       JOIN contracts c ON c.id = v.contract_id
       WHERE TRUE ${filter} ${dates}`;
@@ -140,7 +185,10 @@ export function createReportsService(db) {
   async function aging(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
+    const dates = dateClause(p, 'v.issue_date', filters);
+    const asOf = p.add(filters.asOf || todayIso());
     const sql = `
+      WITH ${invoicesAsOfCte(asOf)}
       SELECT
         CASE
           WHEN v.days_overdue <= 0 THEN 'NOT_DUE'
@@ -151,10 +199,10 @@ export function createReportsService(db) {
         END AS bucket,
         COUNT(*)::int AS count,
         COALESCE(SUM(v.outstanding_amount), 0) AS amount
-      FROM v_invoice_receivable v
+      FROM inv v
       JOIN hospitals h ON h.id = v.hospital_id
       JOIN contracts c ON c.id = v.contract_id
-      WHERE v.status <> 'CANCELLED' AND v.outstanding_amount > 0 ${filter}
+      WHERE v.status <> 'CANCELLED' AND v.outstanding_amount > 0 ${filter} ${dates}
       GROUP BY 1`;
     const { rows } = await db.query(sql, p.values);
     const labels = {
@@ -180,7 +228,7 @@ export function createReportsService(db) {
   async function contractSummary(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
-    const asOf = p.add(filters.asOf || new Date().toISOString().slice(0, 10));
+    const asOf = p.add(filters.asOf || todayIso());
     const sql = `
       SELECT
         COUNT(*) FILTER (WHERE c.status = 'ACTIVE')::int AS active_count,
@@ -201,13 +249,16 @@ export function createReportsService(db) {
   /** รายงานแยกตามผู้แทน (dimension = 'rep') หรือตามโรงพยาบาล (dimension = 'hospital') */
   async function grouped(filters = {}, dimension = 'rep') {
     const isRep = dimension === 'rep';
-    const asOf = filters.asOf || new Date().toISOString().slice(0, 10);
+    const asOf = filters.asOf || todayIso();
     const groupExpr = isRep ? 'h.rep_id' : 'h.id';
 
     // --- 1) ตัวชี้วัดจากใบแจ้งหนี้ ---
     const p1 = new Params();
     const filter1 = scopeClause(p1, filters);
+    const dates1 = dateClause(p1, 'v.issue_date', filters);
+    const asOf1 = p1.add(asOf);
     const invSql = `
+      WITH ${invoicesAsOfCte(asOf1)}
       SELECT
         ${groupExpr} AS group_id,
         ${isRep ? "COALESCE(u.full_name, 'ยังไม่กำหนดผู้แทน')" : 'h.name'} AS group_name,
@@ -219,11 +270,11 @@ export function createReportsService(db) {
         COALESCE(SUM(v.outstanding_amount) FILTER (WHERE v.status <> 'CANCELLED'), 0) AS awaiting_amount,
         COUNT(*) FILTER (WHERE v.status <> 'CANCELLED' AND v.days_overdue > 0 AND v.outstanding_amount > 0)::int AS overdue_count,
         COALESCE(SUM(v.outstanding_amount) FILTER (WHERE v.status <> 'CANCELLED' AND v.days_overdue > 0), 0) AS overdue_amount
-      FROM v_invoice_receivable v
+      FROM inv v
       JOIN hospitals h ON h.id = v.hospital_id
       JOIN contracts c ON c.id = v.contract_id
       ${isRep ? 'LEFT JOIN users u ON u.id = h.rep_id LEFT JOIN regions r ON r.id = u.region_id' : 'LEFT JOIN users u ON u.id = h.rep_id'}
-      WHERE TRUE ${filter1}
+      WHERE TRUE ${filter1} ${dates1}
       GROUP BY 1,2,3`;
 
     // --- 2) ตัวชี้วัดจากงวดสัญญา ---
@@ -231,9 +282,12 @@ export function createReportsService(db) {
     const filter2 = scopeClause(p2, filters);
     const asOfRef = p2.add(asOf);
     const perSql = `
-      WITH ${PERIODS_CTE} ${filter2}
+      WITH ${periodsCte(asOfRef)} ${filter2}
       )
-      SELECT ${groupExpr.replace('h.', 'h.')} AS group_id,
+      SELECT ${groupExpr} AS group_id,
+             ${isRep ? "COALESCE(u.full_name, 'ยังไม่กำหนดผู้แทน')" : 'h.name'} AS group_name,
+             ${isRep ? 'r.name' : "COALESCE(u.full_name, 'ยังไม่กำหนดผู้แทน')"} AS sub_label,
+             COUNT(DISTINCT h.id)::int AS hospital_count,
              COUNT(*)::int AS total_periods,
              COUNT(invoice_id)::int AS invoiced_periods,
              COUNT(*) FILTER (WHERE invoice_id IS NULL AND period_start <= ${asOfRef}::date)::int AS due_not_invoiced_periods,
@@ -242,7 +296,8 @@ export function createReportsService(db) {
         FROM base
         JOIN contracts c ON c.id = base.contract_id
         JOIN hospitals h ON h.id = c.hospital_id
-       GROUP BY 1`;
+        ${isRep ? 'LEFT JOIN users u ON u.id = h.rep_id LEFT JOIN regions r ON r.id = u.region_id' : 'LEFT JOIN users u ON u.id = h.rep_id'}
+       GROUP BY 1, 2, 3`;
 
     const [inv, per] = await Promise.all([
       db.query(invSql, p1.values),
@@ -272,15 +327,16 @@ export function createReportsService(db) {
       };
     });
 
-    // โรงพยาบาล/ผู้แทนที่ยังไม่มีใบแจ้งหนี้เลย แต่มีงวดครบกำหนด -> ต้องแสดงด้วย
+    // ผู้แทนหรือโรงพยาบาลที่ยังไม่มีใบแจ้งหนี้เลย แต่มีงวดในสัญญา ต้องแสดงด้วย
+    // ใช้ชื่อจริงของผู้แทนหรือโรงพยาบาล ทั้งรายงานตามผู้แทนและตามโรงพยาบาล
     for (const pr of per.rows) {
       const key = String(pr.group_id);
-      if (!rows.some((r) => String(r.id) === key) && isRep) {
+      if (!rows.some((r) => String(r.id) === key)) {
         rows.push({
           id: pr.group_id,
-          name: 'ยังไม่มีใบแจ้งหนี้',
-          subLabel: '',
-          hospitalCount: 0,
+          name: pr.group_name,
+          subLabel: pr.sub_label ?? '',
+          hospitalCount: num(pr.hospital_count),
           invoiceCount: 0,
           invoiceAmount: 0,
           chequeAmount: 0,
@@ -316,7 +372,7 @@ export function createReportsService(db) {
       invoices.invoiceCount > 0 ? round2((invoices.deliveredCount / invoices.invoiceCount) * 100) : 0;
 
     return {
-      asOf: filters.asOf || new Date().toISOString().slice(0, 10),
+      asOf: filters.asOf || todayIso(),
       filters,
       kpi: { ...periods, ...invoices, collectionRate, deliveryRate, ...contracts },
       aging: age,
@@ -329,9 +385,9 @@ export function createReportsService(db) {
   async function uninvoicedPeriods(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
-    const asOf = p.add(filters.asOf || new Date().toISOString().slice(0, 10));
+    const asOf = p.add(filters.asOf || todayIso());
     const sql = `
-      WITH ${PERIODS_CTE} ${filter}
+      WITH ${periodsCte(asOf)} ${filter}
       )
       SELECT b.id, b.contract_id, b.period_no, b.period_start, b.period_end, b.due_date,
              b.estimated_amount, b.pricing_mode,
@@ -347,7 +403,7 @@ export function createReportsService(db) {
         LEFT JOIN regions r ON r.id = h.region_id
        WHERE b.invoice_id IS NULL AND b.period_start <= ${asOf}
        ORDER BY b.due_date ASC
-       LIMIT ${p.add(Number(filters.limit || 500))}`;
+       LIMIT ${p.add(clampLimit(filters.limit, 500))}`;
     const { rows } = await db.query(sql, p.values);
     return rows.map((r) => ({
       id: r.id,
@@ -374,19 +430,21 @@ export function createReportsService(db) {
   async function unpaidInvoices(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
+    const asOf = p.add(filters.asOf || todayIso());
     const sql = `
+      WITH ${invoicesAsOfCte(asOf)}
       SELECT v.id, v.invoice_no, v.issue_date, v.due_date, v.total_amount, v.outstanding_amount,
              v.days_overdue, v.payment_state, v.last_delivered_on,
              h.id AS hospital_id, h.name AS hospital_name,
              COALESCE(u.full_name, 'ยังไม่กำหนดผู้แทน') AS rep_name,
              c.contract_no
-        FROM v_invoice_receivable v
+        FROM inv v
         JOIN hospitals h ON h.id = v.hospital_id
         JOIN contracts c ON c.id = v.contract_id
         LEFT JOIN users u ON u.id = h.rep_id
        WHERE v.status <> 'CANCELLED' AND v.outstanding_amount > 0 ${filter}
        ORDER BY v.due_date ASC
-       LIMIT ${p.add(Number(filters.limit || 200))}`;
+       LIMIT ${p.add(clampLimit(filters.limit, 200))}`;
     const { rows } = await db.query(sql, p.values);
     return rows.map((r) => ({
       id: r.id,
@@ -409,7 +467,9 @@ export function createReportsService(db) {
   async function deliveryCoverage(filters = {}) {
     const p = new Params();
     const filter = scopeClause(p, filters);
+    const asOf = p.add(filters.asOf || todayIso());
     const sql = `
+      WITH ${invoicesAsOfCte(asOf)}
       SELECT c.id AS contract_id, c.contract_no, h.name AS hospital_name,
              COALESCE(u.full_name,'ยังไม่กำหนดผู้แทน') AS rep_name,
              COUNT(v.id)::int AS invoice_count,
@@ -418,7 +478,7 @@ export function createReportsService(db) {
         FROM contracts c
         JOIN hospitals h ON h.id = c.hospital_id
         LEFT JOIN users u ON u.id = h.rep_id
-        LEFT JOIN v_invoice_receivable v ON v.contract_id = c.id AND v.status <> 'CANCELLED'
+        LEFT JOIN inv v ON v.contract_id = c.id AND v.status <> 'CANCELLED'
        WHERE c.status <> 'CANCELLED' ${filter}
        GROUP BY 1,2,3,4
        ORDER BY undelivered_count DESC, invoice_count DESC`;

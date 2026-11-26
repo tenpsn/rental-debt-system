@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- เวลาที่เปลี่ยนรหัสผ่านล่าสุด token ที่ออกก่อนเวลานี้จะใช้ไม่ได้
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS hospitals (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code           TEXT NOT NULL UNIQUE,          -- รหัสโรงพยาบาล / รหัสหน่วยงาน

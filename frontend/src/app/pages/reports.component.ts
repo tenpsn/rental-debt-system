@@ -7,14 +7,15 @@ import { AuthService } from '../core/auth.service';
 import {
   AgingRow, DeliveryCoverageRow, GroupRow, Region, UninvoicedPeriod, UnpaidInvoice, User,
 } from '../core/models';
-import { baht, compactBaht, percent, thaiDate, thaiDateShort } from '../core/format';
+import { baht, compactBaht, percent, thaiDate, thaiDateShort, todayIso } from '../core/format';
+import { DateInputComponent } from '../core/date-input.component';
 
 type Tab = 'rep' | 'hospital' | 'aging' | 'delivery' | 'uninvoiced' | 'unpaid';
 
 @Component({
   selector: 'app-reports',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, DateInputComponent],
   template: `
     <div class="page-head">
       <div>
@@ -28,22 +29,26 @@ type Tab = 'rep' | 'hospital' | 'aging' | 'delivery' | 'uninvoiced' | 'unpaid';
         <div class="filters">
           <div class="field">
             <label>ณ วันที่</label>
-            <input type="date" [(ngModel)]="asOf" (ngModelChange)="loadAll()" />
+            <app-date-input [(ngModel)]="asOf" (ngModelChange)="loadAll()" />
           </div>
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ภาค</label>
-            <select [(ngModel)]="regionId" (ngModelChange)="loadAll()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="regionId" (ngModelChange)="loadAll()">
               <option [ngValue]="null">ทุกภาค</option>
               @for (r of regions(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
             </select>
           </div>
+          }
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ผู้แทน</label>
-            <select [(ngModel)]="repId" (ngModelChange)="loadAll()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="repId" (ngModelChange)="loadAll()">
               <option [ngValue]="null">ทุกคน</option>
               @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
             </select>
           </div>
+          }
         </div>
         <div class="tabs" style="margin-top:6px">
           <button class="tab" [class.active]="tab() === 'rep'" (click)="setTab('rep')">ตามผู้แทน</button>
@@ -247,7 +252,7 @@ export class ReportsComponent {
   readonly regions = signal<Region[]>([]);
   readonly reps = signal<User[]>([]);
 
-  asOf = new Date().toISOString().slice(0, 10);
+  asOf = todayIso();
   regionId: number | null = null;
   repId: string | null = null;
 
@@ -300,7 +305,7 @@ export class ReportsComponent {
       g.name, g.subLabel, g.totalPeriods, g.invoicedPeriods, g.dueNotInvoicedPeriods,
       g.remainingValue, g.invoiceAmount, g.chequeAmount, g.awaitingAmount, g.collectionRate,
     ]);
-    const csv = [header, ...body].map((r) => r.join(',')).join('\n');
+    const csv = [header, ...body].map((r) => r.map(csvCell).join(',')).join('\r\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -309,4 +314,14 @@ export class ReportsComponent {
     a.click();
     URL.revokeObjectURL(url);
   }
+}
+
+// แปลงค่าหนึ่งช่องให้ปลอดภัยใน CSV ครอบข้อความด้วยเครื่องหมายคำพูด ชื่อที่มีจุลภาคจะได้ไม่ทำให้คอลัมน์เลื่อน
+// ข้อความที่ขึ้นต้นด้วยเครื่องหมายสูตร ใส่ขีดหน้า เพื่อไม่ให้ Excel รันเป็นสูตร
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return String(value);
+  let text = String(value);
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
 }

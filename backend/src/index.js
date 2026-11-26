@@ -1,8 +1,9 @@
 import { createApp } from './app.js';
 import { pool, db } from './db.js';
-import { config } from './config.js';
+import { assertSecureConfig, config } from './config.js';
 import { logger } from './logger.js';
 
+assertSecureConfig();
 const app = createApp(db);
 
 const server = app.listen(config.port, () => {

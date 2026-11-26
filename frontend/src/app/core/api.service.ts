@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
+import { tap } from 'rxjs';
 import {
   AuditLog, Cheque, ChequeDetail, Contract, ContractDetail, DeliveryCoverageRow,
   GroupRow, Hospital, Invoice, InvoiceDetail, Overview, Region, UninvoicedPeriod,
@@ -46,7 +47,7 @@ export class ApiService {
     return this.http.patch(`/api/master/users/${id}`, body);
   }
   changePassword(body: { current_password: string; new_password: string }) {
-    return this.http.post('/api/auth/change-password', body);
+    return this.http.post<{ ok: boolean; token: string }>('/api/auth/change-password', body);
   }
 
   // ---------- contracts ----------
@@ -67,6 +68,9 @@ export class ApiService {
   }
   renewContract(id: string, body: unknown) {
     return this.http.post<{ id: string; periodCount: number }>(`/api/contracts/${id}/renew`, body);
+  }
+  cancelContract(id: string) {
+    return this.http.delete(`/api/contracts/${id}`);
   }
 
   // ---------- invoices ----------
@@ -111,8 +115,30 @@ export class ApiService {
     form.append('file', file);
     return this.http.post<{ id: string; fileName: string }>('/api/attachments', form);
   }
-  attachmentUrl(id: string, inline = false) {
-    return `/api/attachments/${id}/download?inline=${inline}`;
+
+  deleteDelivery(invoiceId: string, deliveryId: string) {
+    return this.http.delete<{ ok: boolean }>(`/api/invoices/${invoiceId}/deliveries/${deliveryId}`);
+  }
+
+  deleteAttachment(id: string) {
+    return this.http.delete<{ ok: boolean }>(`/api/attachments/${id}`);
+  }
+
+  // เปิดไฟล์แนบในแท็บใหม่ โดยดาวน์โหลดผ่าน header ที่มี token ไม่ใส่ token ใน URL
+  // เปิดแท็บว่างไว้ก่อนตอนที่ผู้ใช้กด ไม่อย่างนั้น browser จะบล็อกป๊อปอัป
+  openAttachment(id: string) {
+    const tab = window.open('', '_blank');
+    return this.http.get(`/api/attachments/${id}/download?inline=true`, { responseType: 'blob' }).pipe(
+      tap({
+        next: (blob) => {
+          const url = URL.createObjectURL(blob);
+          if (tab) tab.location.href = url;
+          else window.location.href = url;
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        },
+        error: () => tab?.close(),
+      }),
+    );
   }
 
   // ---------- reports ----------

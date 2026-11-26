@@ -1,16 +1,18 @@
 import { Component, inject, signal } from '@angular/core';
+import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../core/api.service';
 import { ToastService } from '../core/toast.service';
 import { errorMessage } from '../core/auth.interceptor';
 import { Region, User } from '../core/models';
-import { ROLE_LABEL, thaiDateTime } from '../core/format';
+import { ROLE_LABEL, ROLE_TONE, thaiDateTime } from '../core/format';
+import { ModalDirective } from '../core/modal.directive';
 
 @Component({
   selector: 'app-users',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, ModalDirective],
   template: `
     <div class="page-head">
       <div>
@@ -31,7 +33,7 @@ import { ROLE_LABEL, thaiDateTime } from '../core/format';
               <tr>
                 <td><b>{{ u.fullName }}</b><div class="small muted">{{ u.phone || '' }}</div></td>
                 <td class="small">{{ u.email }}</td>
-                <td><span class="chip" [class.blue]="u.role === 'ADMIN'" [class.violet]="u.role === 'MANAGER'">{{ roleLabel(u.role) }}</span></td>
+                <td><span [class]="'chip ' + roleTone(u.role)">{{ roleLabel(u.role) }}</span></td>
                 <td class="small">{{ u.regionName || 'ทั้งประเทศ' }}</td>
                 <td class="num">{{ u.hospitalCount ?? '—' }}</td>
                 <td class="small muted">{{ u.lastLoginAt ? thaiDateTime(u.lastLoginAt) : 'ยังไม่เข้าใช้' }}</td>
@@ -49,7 +51,7 @@ import { ROLE_LABEL, thaiDateTime } from '../core/format';
     </div>
 
     @if (formOpen()) {
-      <div class="modal-backdrop" (click)="formOpen.set(false)">
+      <div class="modal-backdrop" appModal (dismiss)="formOpen.set(false)">
         <div class="modal" (click)="$event.stopPropagation()">
           <div class="modal-head"><h2>{{ editingId() ? 'แก้ไขผู้ใช้' : 'เพิ่มผู้ใช้' }}</h2></div>
           <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
@@ -84,7 +86,7 @@ import { ROLE_LABEL, thaiDateTime } from '../core/format';
           </div>
           <div class="modal-foot">
             <button class="btn" (click)="formOpen.set(false)">ยกเลิก</button>
-            <button class="btn primary" (click)="save()">บันทึก</button>
+            <button class="btn primary" (click)="save()" [disabled]="busy()">บันทึก</button>
           </div>
         </div>
       </div>
@@ -92,6 +94,8 @@ import { ROLE_LABEL, thaiDateTime } from '../core/format';
   `,
 })
 export class UsersComponent {
+  // กันกดปุ่มบันทึกซ้ำระหว่างรอผล
+  readonly busy = signal(false);
   private api = inject(ApiService);
   private toast = inject(ToastService);
 
@@ -103,6 +107,7 @@ export class UsersComponent {
   form = this.blank();
 
   readonly roleLabel = (r: string) => ROLE_LABEL[r] ?? r;
+  readonly roleTone = (r: string) => ROLE_TONE[r] ?? '';
   readonly thaiDateTime = thaiDateTime;
 
   constructor() {
@@ -151,7 +156,9 @@ export class UsersComponent {
     if (this.form.password) body['password'] = this.form.password;
 
     const req = id ? this.api.updateUser(id, body) : this.api.createUser(body);
-    req.subscribe({
+    if (this.busy()) return;
+    this.busy.set(true);
+    req.pipe(finalize(() => this.busy.set(false))).subscribe({
       next: () => {
         this.toast.success('บันทึกผู้ใช้แล้ว');
         this.formOpen.set(false);

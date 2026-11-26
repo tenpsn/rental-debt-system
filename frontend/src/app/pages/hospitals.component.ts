@@ -1,4 +1,5 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, DestroyRef, inject, signal } from '@angular/core';
+import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService } from '../core/api.service';
@@ -6,11 +7,12 @@ import { AuthService } from '../core/auth.service';
 import { ToastService } from '../core/toast.service';
 import { errorMessage } from '../core/auth.interceptor';
 import { Hospital, Region, User } from '../core/models';
+import { ModalDirective } from '../core/modal.directive';
 
 @Component({
   selector: 'app-hospitals',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, ModalDirective],
   template: `
     <div class="page-head">
       <div>
@@ -29,6 +31,7 @@ import { Hospital, Region, User } from '../core/models';
             <label>ค้นหา</label>
             <input [(ngModel)]="search" (ngModelChange)="debouncedLoad()" placeholder="ชื่อ หรือรหัสโรงพยาบาล" />
           </div>
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ภาค</label>
             <select [(ngModel)]="regionId" (ngModelChange)="load()">
@@ -36,13 +39,16 @@ import { Hospital, Region, User } from '../core/models';
               @for (r of regions(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
             </select>
           </div>
+          }
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ผู้แทน</label>
-            <select [(ngModel)]="repId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="repId" (ngModelChange)="load()">
               <option [ngValue]="null">ทุกคน</option>
               @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
             </select>
           </div>
+          }
         </div>
       </div>
     </div>
@@ -80,7 +86,7 @@ import { Hospital, Region, User } from '../core/models';
     </div>
 
     @if (formOpen()) {
-      <div class="modal-backdrop" (click)="formOpen.set(false)">
+      <div class="modal-backdrop" appModal (dismiss)="formOpen.set(false)">
         <div class="modal" (click)="$event.stopPropagation()">
           <div class="modal-head"><h2>{{ editingId() ? 'แก้ไขโรงพยาบาล' : 'เพิ่มโรงพยาบาล' }}</h2></div>
           <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
@@ -115,7 +121,7 @@ import { Hospital, Region, User } from '../core/models';
           </div>
           <div class="modal-foot">
             <button class="btn" (click)="formOpen.set(false)">ยกเลิก</button>
-            <button class="btn primary" (click)="save()">บันทึก</button>
+            <button class="btn primary" (click)="save()" [disabled]="busy()">บันทึก</button>
           </div>
         </div>
       </div>
@@ -123,6 +129,8 @@ import { Hospital, Region, User } from '../core/models';
   `,
 })
 export class HospitalsComponent {
+  // กันกดปุ่มบันทึกซ้ำระหว่างรอผล
+  readonly busy = signal(false);
   private api = inject(ApiService);
   readonly auth = inject(AuthService);
   private toast = inject(ToastService);
@@ -140,6 +148,8 @@ export class HospitalsComponent {
   form = this.blank();
 
   private timer?: ReturnType<typeof setTimeout>;
+  // ออกจากหน้านี้แล้วยกเลิกการค้นหาที่รออยู่
+  private readonly clearTimer = inject(DestroyRef).onDestroy(() => clearTimeout(this.timer));
 
   constructor() {
     this.api.regions().subscribe((r) => this.regions.set(r));
@@ -198,7 +208,9 @@ export class HospitalsComponent {
     const id = this.editingId();
     const body = { ...this.form };
     const req = id ? this.api.updateHospital(id, body) : this.api.createHospital(body);
-    req.subscribe({
+    if (this.busy()) return;
+    this.busy.set(true);
+    req.pipe(finalize(() => this.busy.set(false))).subscribe({
       next: () => {
         this.toast.success('บันทึกข้อมูลแล้ว');
         this.formOpen.set(false);

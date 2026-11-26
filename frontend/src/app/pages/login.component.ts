@@ -1,7 +1,7 @@
 import { Component, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import { AuthService } from '../core/auth.service';
 import { errorMessage } from '../core/auth.interceptor';
 
@@ -35,6 +35,9 @@ import { errorMessage } from '../core/auth.interceptor';
           <h2>เข้าสู่ระบบ</h2>
           <p class="muted small" style="margin:4px 0 20px">ใช้บัญชีที่ผู้ดูแลระบบออกให้</p>
 
+          @if (expired() && !error()) {
+            <div class="alert info" style="margin-bottom:14px">หมดเวลาเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่อีกครั้ง</div>
+          }
           @if (error()) {
             <div class="alert" style="margin-bottom:14px">{{ error() }}</div>
           }
@@ -55,6 +58,8 @@ import { errorMessage } from '../core/auth.interceptor';
           <div class="demo-box">
             <b>บัญชีตัวอย่าง</b>
             <div>ผู้ดูแลระบบ: admin&#64;medrental.co.th / Admin123!</div>
+            <div>ผู้จัดการ: manager&#64;medrental.co.th / ChangeMe123!</div>
+            <div>ฝ่ายบัญชี: accounting&#64;medrental.co.th / ChangeMe123!</div>
             <div>ผู้แทนพื้นที่: somchai&#64;medrental.co.th / ChangeMe123!</div>
           </div>
         </form>
@@ -88,11 +93,15 @@ import { errorMessage } from '../core/auth.interceptor';
 export class LoginComponent {
   private auth = inject(AuthService);
   private router = inject(Router);
+  private route = inject(ActivatedRoute);
 
   email = '';
   password = '';
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
+  // มาจากการหมดเวลาเข้าสู่ระบบ และหน้าที่จะพากลับไปหลังล็อกอิน
+  readonly expired = signal(this.route.snapshot.queryParamMap.get('expired') === '1');
+  private readonly returnUrl = this.route.snapshot.queryParamMap.get('returnUrl');
 
   submit() {
     if (!this.email || !this.password) {
@@ -104,7 +113,9 @@ export class LoginComponent {
     this.auth.login(this.email.trim(), this.password).subscribe({
       next: () => {
         this.loading.set(false);
-        this.router.navigate(['/dashboard']);
+        // กลับไปหน้าที่ค้างไว้ ถ้าเป็นที่อยู่ภายในระบบเท่านั้น
+        const target = this.returnUrl && this.returnUrl.startsWith('/') && !this.returnUrl.startsWith('//') ? this.returnUrl : '/dashboard';
+        this.router.navigateByUrl(target);
       },
       error: (e) => {
         this.loading.set(false);

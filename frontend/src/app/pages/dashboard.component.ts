@@ -18,21 +18,25 @@ import { baht, compactBaht, money, percent, thaiDate, thaiDateShort } from '../c
         <h1>ภาพรวมการติดตามหนี้</h1>
         <p>สรุปสถานะการแจ้งหนี้ การรับเช็ค และอายุหนี้ ข้อมูล ณ วันที่ {{ thaiDate(overview()?.asOf) }}</p>
       </div>
-      <div class="row wrap">
+      <div class="filters">
+        @if (!auth.isRep()) {
         <div class="field">
           <label>ภาค</label>
-          <select [(ngModel)]="regionId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+          <select [(ngModel)]="regionId" (ngModelChange)="load()">
             <option [ngValue]="null">ทุกภาค</option>
             @for (r of regions(); track r.id) { <option [ngValue]="r.id">{{ r.name }}</option> }
           </select>
         </div>
+        }
+        @if (!auth.isRep()) {
         <div class="field">
           <label>ผู้แทน</label>
-          <select [(ngModel)]="repId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+          <select [(ngModel)]="repId" (ngModelChange)="load()">
             <option [ngValue]="null">ทุกคน</option>
             @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
           </select>
         </div>
+        }
         <button class="btn" (click)="load()">↻ รีเฟรช</button>
       </div>
     </div>

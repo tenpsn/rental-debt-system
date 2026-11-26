@@ -7,12 +7,14 @@ import { AuthService } from '../core/auth.service';
 import { ToastService } from '../core/toast.service';
 import { errorMessage } from '../core/auth.interceptor';
 import { Cheque, Hospital, UnpaidInvoice, User } from '../core/models';
-import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate, thaiDateShort } from '../core/format';
+import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, thaiDateShort, todayIso } from '../core/format';
+import { DateInputComponent } from '../core/date-input.component';
+import { ModalDirective } from '../core/modal.directive';
 
 @Component({
   selector: 'app-cheques',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, DateInputComponent, ModalDirective],
   template: `
     <div class="page-head">
       <div>
@@ -42,16 +44,18 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
               @for (h of hospitals(); track h.id) { <option [ngValue]="h.id">{{ h.name }}</option> }
             </select>
           </div>
+          @if (!auth.isRep()) {
           <div class="field">
             <label>ผู้แทน</label>
-            <select [(ngModel)]="repId" (ngModelChange)="load()" [disabled]="auth.user()?.role === 'REP'">
+            <select [(ngModel)]="repId" (ngModelChange)="load()">
               <option [ngValue]="null">ทั้งหมด</option>
               @for (u of reps(); track u.id) { <option [ngValue]="u.id">{{ u.fullName }}</option> }
             </select>
           </div>
+          }
           <div class="field">
             <label>รับตั้งแต่</label>
-            <input type="date" [(ngModel)]="from" (ngModelChange)="load()" />
+            <app-date-input [(ngModel)]="from" (ngModelChange)="load()" />
           </div>
         </div>
       </div>
@@ -96,7 +100,8 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
                 </td>
               </tr>
             } @empty {
-              @if (!loading()) { <tr><td colspan="8" class="empty">ไม่พบเช็ค</td></tr> }
+              @if (loadError()) { <tr><td colspan="8" class="empty">โหลดข้อมูลไม่สำเร็จ: {{ loadError() }}</td></tr> }
+              @else if (!loading()) { <tr><td colspan="8" class="empty">ไม่พบเช็ค</td></tr> }
             }
           </tbody>
         </table>
@@ -104,7 +109,7 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
     </div>
 
     @if (createOpen()) {
-      <div class="modal-backdrop" (click)="createOpen.set(false)">
+      <div class="modal-backdrop" appModal (dismiss)="createOpen.set(false)">
         <div class="modal wide" (click)="$event.stopPropagation()">
           <div class="modal-head"><h2>บันทึกเช็คใหม่</h2></div>
           <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
@@ -130,8 +135,8 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
             </div>
             <div class="grid grid-3">
               <div class="field"><label>จำนวนเงิน *</label><input type="number" min="0" step="0.01" [(ngModel)]="form.amount" /></div>
-              <div class="field"><label>วันที่หน้าเช็ค</label><input type="date" [(ngModel)]="form.chequeDate" /></div>
-              <div class="field"><label>วันที่รับเช็ค</label><input type="date" [(ngModel)]="form.receivedDate" /></div>
+              <div class="field"><label>วันที่หน้าเช็ค</label><app-date-input [(ngModel)]="form.chequeDate" /></div>
+              <div class="field"><label>วันที่รับเช็ค</label><app-date-input [(ngModel)]="form.receivedDate" /></div>
             </div>
             <div class="grid grid-2">
               <div class="field">
@@ -143,30 +148,34 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
                   <option value="HAND_DELIVERED">นำส่งด้วยตนเอง</option>
                 </select>
               </div>
-              <div class="field"><label>วันที่ถึงบริษัท</label><input type="date" [(ngModel)]="form.companyReceivedDate" /></div>
+              <div class="field"><label>วันที่ถึงบริษัท</label><app-date-input [(ngModel)]="form.companyReceivedDate" /></div>
             </div>
 
             <div class="divider"></div>
             <div class="row between">
               <b>ตัดชำระใบแจ้งหนี้</b>
-              <span class="small" [style.color]="allocatedTotal() > form.amount ? 'var(--red)' : 'var(--ink-3)'">
+              <span class="small" [style.color]="overAllocated() ? 'var(--red)' : 'var(--muted)'">
                 ตัดแล้ว {{ baht(allocatedTotal()) }} / {{ baht(form.amount) }}
               </span>
             </div>
+            @if (overAllocated()) {
+              <div class="alert">ยอดตัดชำระรวมเกินยอดเช็ค {{ baht(allocatedTotal() - form.amount) }} กรุณาลดยอดก่อนบันทึก</div>
+            }
             <div class="scroll-y" style="max-height:240px">
               <table>
                 <thead><tr><th></th><th>เลขที่ใบแจ้งหนี้</th><th>ครบกำหนด</th><th class="num">คงค้าง</th><th class="num">ตัดชำระ</th></tr></thead>
                 <tbody>
                   @for (u of unpaid(); track u.id) {
                     <tr>
-                      <td><input type="checkbox" [checked]="alloc[u.id] !== undefined" (change)="toggleAlloc(u)" /></td>
+                      <td><input type="checkbox" [checked]="alloc()[u.id] !== undefined" (change)="toggleAlloc(u)" [attr.aria-label]="'ตัดชำระ ' + u.invoiceNo" /></td>
                       <td class="mono small">{{ u.invoiceNo }}</td>
                       <td class="small">{{ thaiDateShort(u.dueDate) }}</td>
                       <td class="num small">{{ baht(u.outstandingAmount) }}</td>
                       <td class="num">
-                        @if (alloc[u.id] !== undefined) {
-                          <input type="number" style="width:110px;text-align:right" step="0.01"
-                                 [ngModel]="alloc[u.id]" (ngModelChange)="setAlloc(u.id, $event)" />
+                        @if (alloc()[u.id] !== undefined) {
+                          <input type="number" style="width:110px;text-align:right" step="0.01" min="0" [max]="u.outstandingAmount"
+                                 [attr.aria-label]="'ยอดตัดชำระ ' + u.invoiceNo"
+                                 [ngModel]="alloc()[u.id]" (ngModelChange)="setAlloc(u, $event)" />
                         } @else { <span class="muted">—</span> }
                       </td>
                     </tr>
@@ -182,7 +191,7 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
           </div>
           <div class="modal-foot">
             <button class="btn" (click)="createOpen.set(false)">ยกเลิก</button>
-            <button class="btn primary" (click)="save()" [disabled]="saving()">บันทึกเช็ค</button>
+            <button class="btn primary" (click)="save()" [disabled]="saving() || overAllocated()">บันทึกเช็ค</button>
           </div>
         </div>
       </div>
@@ -190,6 +199,8 @@ import { CHEQUE_DELIVERY_LABEL, CHEQUE_STATUS_LABEL, baht, compactBaht, thaiDate
   `,
 })
 export class ChequesComponent {
+  // ข้อความเมื่อโหลดรายการไม่สำเร็จ แยกจากกรณีไม่มีข้อมูลจริง
+  readonly loadError = signal('');
   private api = inject(ApiService);
   readonly auth = inject(AuthService);
   private toast = inject(ToastService);
@@ -208,13 +219,21 @@ export class ChequesComponent {
   from = '';
 
   form = this.blankForm();
-  alloc: Record<string, number> = {};
+  // ยอดตัดชำระแยกตามใบแจ้งหนี้ ต้องเป็น signal ยอดรวมถึงจะคำนวณใหม่ทุกครั้งที่แก้
+  readonly alloc = signal<Record<string, number>>({});
 
   readonly baht = baht;
   readonly thaiDateShort = thaiDateShort;
   readonly statusLabel = (s: string) => CHEQUE_STATUS_LABEL[s]?.text ?? s;
   readonly deliveryLabel = (m: string) => CHEQUE_DELIVERY_LABEL[m] ?? m;
-  readonly allocatedTotal = computed(() => Object.values(this.alloc).reduce((a, b) => a + (Number(b) || 0), 0));
+  readonly allocatedTotal = computed(() =>
+    Math.round(Object.values(this.alloc()).reduce((a, b) => a + (Number(b) || 0), 0) * 100) / 100,
+  );
+
+  // ยอดเช็คอยู่ในฟอร์มธรรมดา จึงเช็คด้วยฟังก์ชันทุกครั้งที่หน้าจอวาดใหม่
+  overAllocated(): boolean {
+    return this.allocatedTotal() > (Number(this.form.amount) || 0) + 0.004;
+  }
 
   constructor() {
     this.api.hospitals().subscribe((r) => this.hospitals.set(r));
@@ -223,7 +242,7 @@ export class ChequesComponent {
   }
 
   private blankForm() {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayIso();
     return {
       hospitalId: '',
       chequeNo: '',
@@ -241,6 +260,7 @@ export class ChequesComponent {
 
   load() {
     this.loading.set(true);
+    this.loadError.set('');
     this.api
       .cheques({ status: this.status, hospital_id: this.hospitalId, rep_id: this.repId, date_from: this.from })
       .subscribe({
@@ -248,19 +268,22 @@ export class ChequesComponent {
           this.cheques.set(rows);
           this.loading.set(false);
         },
-        error: () => this.loading.set(false),
+        error: (e) => {
+          this.loading.set(false);
+          this.loadError.set(errorMessage(e));
+        },
       });
   }
 
   openCreate() {
     this.form = this.blankForm();
-    this.alloc = {};
+    this.alloc.set({});
     this.unpaid.set([]);
     this.createOpen.set(true);
   }
 
   loadUnpaid() {
-    this.alloc = {};
+    this.alloc.set({});
     if (!this.form.hospitalId) {
       this.unpaid.set([]);
       return;
@@ -268,17 +291,24 @@ export class ChequesComponent {
     this.api.unpaidInvoices({ hospital_id: this.form.hospitalId, limit: 50 }).subscribe((rows) => this.unpaid.set(rows));
   }
 
+  // ติ๊กแล้วใส่ยอดให้เท่ากับยอดเช็คที่เหลือ แต่ไม่เกินยอดค้างของใบนั้น
+  // ถ้ายังไม่กรอกยอดเช็ค ให้ใส่เต็มยอดค้าง
   toggleAlloc(u: UnpaidInvoice) {
-    if (this.alloc[u.id] !== undefined) {
-      delete this.alloc[u.id];
+    const current = { ...this.alloc() };
+    if (current[u.id] !== undefined) {
+      delete current[u.id];
     } else {
-      const remaining = Math.max(0, (this.form.amount || 0) - this.allocatedTotal());
-      this.alloc[u.id] = Math.min(u.outstandingAmount, remaining || u.outstandingAmount);
+      const chequeAmount = Number(this.form.amount) || 0;
+      const remaining = Math.max(0, chequeAmount - this.allocatedTotal());
+      current[u.id] = chequeAmount > 0 ? Math.min(u.outstandingAmount, remaining) : u.outstandingAmount;
     }
+    this.alloc.set(current);
   }
 
-  setAlloc(id: string, value: number) {
-    this.alloc[id] = Number(value) || 0;
+  // ยอดตัดชำระต้องไม่ติดลบ และไม่เกินยอดค้างของใบนั้น
+  setAlloc(u: UnpaidInvoice, value: number) {
+    const amount = Math.min(Math.max(Number(value) || 0, 0), u.outstandingAmount);
+    this.alloc.set({ ...this.alloc(), [u.id]: amount });
   }
 
   save() {
@@ -289,7 +319,7 @@ export class ChequesComponent {
     const body = {
       ...this.form,
       companyReceivedDate: this.form.companyReceivedDate || null,
-      allocations: Object.entries(this.alloc)
+      allocations: Object.entries(this.alloc())
         .filter(([, v]) => Number(v) > 0)
         .map(([invoiceId, amount]) => ({ invoiceId, amount: Number(amount) })),
     };

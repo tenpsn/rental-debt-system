@@ -5,7 +5,10 @@
  * - EVERY_15_DAYS  : งวดละ 15 วัน
  */
 
+import { ApiError } from '../lib/errors.js';
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_CONTRACT_DAYS = 3660;
 
 export function toDate(value) {
   if (value instanceof Date) return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
@@ -40,7 +43,14 @@ export function buildPeriods({
 }) {
   const start = toDate(startDate);
   const end = toDate(endDate);
-  if (end < start) throw new Error('วันที่สิ้นสุดสัญญาต้องไม่น้อยกว่าวันที่เริ่ม');
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw ApiError.badRequest('วันที่เริ่มหรือวันที่สิ้นสุดสัญญาไม่ถูกต้อง');
+  }
+  if (end < start) throw ApiError.badRequest('วันที่สิ้นสุดสัญญาต้องไม่น้อยกว่าวันที่เริ่ม');
+  // สัญญายาวสุด 10 ปี กันการสร้างงวดจำนวนมากเกินจนเครื่องช้า
+  if (end.getTime() - start.getTime() > MAX_CONTRACT_DAYS * DAY_MS) {
+    throw ApiError.badRequest('สัญญายาวได้ไม่เกิน 10 ปี');
+  }
 
   const periods = [];
   let cursor = start;
@@ -52,7 +62,7 @@ export function buildPeriods({
       periodEnd = endOfMonth(cursor);
     } else {
       const span = CYCLE_DAYS[billingCycle];
-      if (!span) throw new Error(`รอบการจ่ายไม่ถูกต้อง: ${billingCycle}`);
+      if (!span) throw ApiError.badRequest('รอบการจ่ายไม่ถูกต้อง');
       periodEnd = addDays(cursor, span - 1);
     }
     if (periodEnd > end) periodEnd = end;

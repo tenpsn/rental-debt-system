@@ -1,12 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ApiError } from '../lib/errors.js';
-import { parse } from '../lib/validate.js';
-import { authorize } from '../middleware/auth.js';
+import { clampLimit, dateStr, nonNegativeMoney, parse, positiveMoney } from '../lib/validate.js';
+import { assertRepAccess, authorize } from '../middleware/auth.js';
 import { audit } from '../lib/audit.js';
 import { regeneratePeriods, buildPeriods } from '../services/periods.js';
 
-const dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'รูปแบบวันที่ต้องเป็น YYYY-MM-DD');
 
 const contractSchema = z.object({
   contractNo: z.string().min(1, 'กรุณากรอกเลขที่สัญญา'),
@@ -17,8 +16,8 @@ const contractSchema = z.object({
   endDate: dateStr,
   billingCycle: z.enum(['MONTHLY', 'EVERY_10_DAYS', 'EVERY_15_DAYS']).default('MONTHLY'),
   pricingMode: z.enum(['FIXED', 'PAY_PER_USE']).default('FIXED'),
-  periodAmount: z.number().nonnegative().optional().nullable(),
-  unitPrice: z.number().nonnegative().optional().nullable(),
+  periodAmount: nonNegativeMoney.optional().nullable(),
+  unitPrice: nonNegativeMoney.optional().nullable(),
   unitName: z.string().optional().nullable(),
   paymentTermDays: z.number().int().min(0).max(365).default(30),
   vatRate: z.number().min(0).max(100).default(7),
@@ -31,7 +30,7 @@ const contractSchema = z.object({
         name: z.string().min(1),
         model: z.string().optional().nullable(),
         serialNo: z.string().optional().nullable(),
-        qty: z.number().int().positive().default(1),
+        qty: z.number().int().positive().max(100000).default(1),
         note: z.string().optional().nullable(),
       }),
     )
@@ -112,10 +111,15 @@ export default function contractRoutes(db) {
            JOIN hospitals h ON h.id = c.hospital_id
            LEFT JOIN users u ON u.id = h.rep_id
            LEFT JOIN regions r ON r.id = h.region_id
+           -- งวดแบบจ่ายตามใช้ยังไม่รู้ยอด ประมาณจากค่าเฉลี่ยใบแจ้งหนี้ของสัญญานั้น แบบเดียวกับหน้าภาพรวม
+           LEFT JOIN LATERAL (
+             SELECT AVG(i.amount) AS avg_amount FROM invoices i
+              WHERE i.contract_id = c.id AND i.status <> 'CANCELLED'
+           ) est ON TRUE
            LEFT JOIN LATERAL (
              SELECT COUNT(*) AS total_periods,
                     COUNT(*) FILTER (WHERE inv.invoice_id IS NOT NULL) AS invoiced_periods,
-                    COALESCE(SUM(COALESCE(cp.expected_amount, 0)) FILTER (WHERE inv.invoice_id IS NULL), 0) AS remaining_value,
+                    COALESCE(SUM(COALESCE(cp.expected_amount, est.avg_amount, 0)) FILTER (WHERE inv.invoice_id IS NULL), 0) AS remaining_value,
                     MIN(cp.due_date) FILTER (WHERE inv.invoice_id IS NULL) AS next_due_date
                FROM contract_periods cp
                LEFT JOIN LATERAL (
@@ -159,6 +163,7 @@ export default function contractRoutes(db) {
   router.get(
     '/:id',
     asyncHandler(async (req, res) => {
+      await assertRepAccess(db, req.user, 'CONTRACT', req.params.id);
       const { rows } = await db.query(
         `SELECT c.*, h.name AS hospital_name, h.code AS hospital_code, h.province, h.rep_id,
                 u.full_name AS rep_name, r.name AS region_name
@@ -172,7 +177,7 @@ export default function contractRoutes(db) {
       const contract = rows[0];
       if (!contract) throw ApiError.notFound('ไม่พบสัญญา');
 
-      const [periods, equipment] = await Promise.all([
+      const [periods, equipment, estimate] = await Promise.all([
         db.query(
           `SELECT cp.*, v.id AS invoice_id, v.invoice_no, v.total_amount, v.outstanding_amount,
                   v.payment_state, v.last_delivered_on, v.days_overdue, v.cheque_received_amount,
@@ -184,7 +189,15 @@ export default function contractRoutes(db) {
           [req.params.id],
         ),
         db.query('SELECT * FROM equipment WHERE contract_id = $1 ORDER BY name', [req.params.id]),
+        db.query(
+          `SELECT AVG(amount) AS avg_amount FROM invoices WHERE contract_id = $1 AND status <> 'CANCELLED'`,
+          [req.params.id],
+        ),
       ]);
+      // งวดแบบจ่ายตามใช้ที่ยังไม่ออกใบ ประมาณยอดจากค่าเฉลี่ย ให้ตรงกับหน้ารายการและหน้าภาพรวม
+      const avgAmount = Number(estimate.rows[0]?.avg_amount || 0);
+      const estimatedRemaining = (rows) =>
+        Math.round(rows.reduce((total, p) => total + Number(p.expected_amount ?? avgAmount), 0) * 100) / 100;
 
       // คำนวณยอดสรุปจากงวดทั้งหมด ให้ตรงกับหน้ารายการสัญญา
       const sumBy = (rows, key) =>
@@ -200,7 +213,7 @@ export default function contractRoutes(db) {
         invoicedAmount: sumBy(invoicedRows, 'total_amount'),
         collectedAmount: sumBy(invoicedRows, 'cheque_received_amount'),
         outstandingAmount: sumBy(invoicedRows, 'outstanding_amount'),
-        remainingValue: sumBy(uninvoicedRows, 'expected_amount'),
+        remainingValue: estimatedRemaining(uninvoicedRows),
         nextDueDate: uninvoicedDueDates[0] || null,
         periods: periods.rows.map((p) => ({
           id: p.id,
@@ -351,6 +364,10 @@ export default function contractRoutes(db) {
         const { rows } = await client.query('SELECT * FROM contracts WHERE id = $1', [req.params.id]);
         const prev = rows[0];
         if (!prev) throw ApiError.notFound('ไม่พบสัญญาเดิม');
+        // สัญญาต่อเนื่องต้องเริ่มหลังวันสิ้นสุดสัญญาเดิม ไม่อย่างนั้นจะมีงวดซ้อนกันและเก็บเงินซ้ำ
+        if (b.startDate <= prev.end_date) {
+          throw ApiError.badRequest('สัญญาต่อเนื่องต้องเริ่มหลังวันสิ้นสุดสัญญาเดิม');
+        }
 
         const { rows: newRows } = await client.query(
           `INSERT INTO contracts
@@ -392,8 +409,35 @@ export default function contractRoutes(db) {
     '/:id',
     authorize('ADMIN'),
     asyncHandler(async (req, res) => {
-      await db.query(`UPDATE contracts SET status = 'CANCELLED' WHERE id = $1`, [req.params.id]);
-      await audit(db, req, { action: 'CANCEL', entityType: 'CONTRACT', entityId: req.params.id });
+      // ยกเลิกสัญญาไม่ได้ ถ้ายังมีใบแจ้งหนี้ค้างชำระ เพราะหนี้นั้นยังต้องเก็บ
+      // ต้องรับชำระหรือยกเลิกใบแจ้งหนี้ให้หมดก่อน สัญญาที่ยกเลิกจะได้ไม่มีหนี้ค้างซ่อนอยู่
+      const open = await db.query(
+        `SELECT COUNT(*)::int AS n, COALESCE(SUM(outstanding_amount), 0) AS amount
+           FROM v_invoice_receivable WHERE contract_id = $1 AND status <> 'CANCELLED' AND outstanding_amount > 0`,
+        [req.params.id],
+      );
+      if (open.rows[0].n > 0) {
+        throw ApiError.conflict(
+          `สัญญานี้ยังมีใบแจ้งหนี้ค้างชำระ ${open.rows[0].n} ใบ กรุณารับชำระหรือยกเลิกใบแจ้งหนี้ก่อนยกเลิกสัญญา`,
+        );
+      }
+      // บันทึกการใช้งานเฉพาะเมื่อยกเลิกได้จริง
+      const upd = await db.query(
+        `UPDATE contracts SET status = 'CANCELLED' WHERE id = $1 AND status <> 'CANCELLED'
+         RETURNING contract_no, status`,
+        [req.params.id],
+      );
+      if (!upd.rowCount) {
+        const exists = await db.query('SELECT 1 FROM contracts WHERE id = $1', [req.params.id]);
+        if (!exists.rowCount) throw ApiError.notFound('ไม่พบสัญญา');
+        throw ApiError.conflict('สัญญานี้ถูกยกเลิกไปแล้ว');
+      }
+      await audit(db, req, {
+        action: 'CANCEL',
+        entityType: 'CONTRACT',
+        entityId: req.params.id,
+        payload: { contractNo: upd.rows[0].contract_no },
+      });
       res.json({ ok: true });
     }),
   );

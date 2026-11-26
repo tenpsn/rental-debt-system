@@ -18,7 +18,7 @@
 ## เทคโนโลยี
 
 - **PostgreSQL 14+** — ตาราง, view `v_invoice_receivable`, trigger `updated_at`
-- **Node.js 18+ / Express 4** — REST API, JWT, Zod validation, Multer upload, Pino log
+- **Node.js 20+ / Express 4** — REST API, JWT, Zod validation, Multer upload, Pino log
 - **Angular 20** — standalone components, signals, Thai Buddhist-era date formatting
 
 ## เริ่มใช้งานเร็ว
@@ -28,7 +28,7 @@
 ```bash
 cd backend
 npm install
-cp .env.example .env     # แก้ DB_PASSWORD ให้ตรงกับเครื่อง
+cp .env.example .env     # แก้ DB_PASSWORD และใส่ JWT_SECRET แบบสุ่ม (ดูวิธีสร้างในไฟล์)
 npm run migrate          # สร้างตาราง
 npm run dev              # start API ที่ :3000
 ```

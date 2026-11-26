@@ -1,4 +1,5 @@
 import { Component, OnInit, computed, inject, input, signal } from '@angular/core';
+import { finalize } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
@@ -7,15 +8,18 @@ import { AuthService } from '../core/auth.service';
 import { ToastService } from '../core/toast.service';
 import { errorMessage } from '../core/auth.interceptor';
 import { ContractDetail, Period } from '../core/models';
+import { DateInputComponent } from '../core/date-input.component';
 import {
-  BILLING_CYCLE_LABEL, CONTRACT_TYPE_LABEL, PAYMENT_STATE_LABEL,
-  baht, compactBaht, money, percent, thaiDate, thaiDateShort,
+  BILLING_CYCLE_LABEL, CONTRACT_STATUS_LABEL, CONTRACT_TYPE_LABEL, PAYMENT_STATE_LABEL,
+  baht, compactBaht, percent, thaiDate, thaiDateShort,
+  todayIso,
 } from '../core/format';
+import { ModalDirective } from '../core/modal.directive';
 
 @Component({
   selector: 'app-contract-detail',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, DateInputComponent, ModalDirective],
   template: `
     @if (contract(); as c) {
       <div class="page-head">
@@ -33,7 +37,10 @@ import {
             <button class="btn" (click)="openRenew()">ต่อสัญญาใหม่</button>
           }
           @if (auth.canInvoice() && bulkCandidates().length) {
-            <button class="btn primary" (click)="bulkIssue()">ออกใบแจ้งหนี้ที่ค้าง {{ bulkCandidates().length }} งวด</button>
+            <button class="btn primary" (click)="bulkIssue()" [disabled]="saving()">ออกใบแจ้งหนี้ที่ค้าง {{ bulkCandidates().length }} งวด</button>
+          }
+          @if (auth.isAdmin() && c.status !== 'CANCELLED') {
+            <button class="btn danger" (click)="cancelContract()" [disabled]="saving()">ยกเลิกสัญญา</button>
           }
         </div>
       </div>
@@ -67,7 +74,7 @@ import {
 
       <div class="grid grid-3" style="margin-bottom:14px;align-items:start">
         <div class="card">
-          <div class="card-head"><h2>ข้อมูลสัญญา</h2><span class="chip green">{{ c.status === 'ACTIVE' ? 'ใช้งาน' : c.status }}</span></div>
+          <div class="card-head"><h2>ข้อมูลสัญญา</h2><span [class]="'chip ' + statusLabel(c.status).tone">{{ statusLabel(c.status).text }}</span></div>
           <div class="card-body">
             <dl class="kv">
               <dt>ประเภท</dt><dd>{{ typeLabel(c.contractType) }}</dd>
@@ -190,12 +197,19 @@ import {
         </div>
       </div>
     } @else {
-      <div class="card"><div class="empty">กำลังโหลดสัญญา…</div></div>
+      @if (loadError()) {
+        <div class="card"><div class="empty">
+          <div style="margin-bottom:10px">โหลดข้อมูลไม่สำเร็จ: {{ loadError() }}</div>
+          <a routerLink="/contracts">← กลับไปรายการสัญญา</a>
+        </div></div>
+      } @else {
+        <div class="card"><div class="empty">กำลังโหลดสัญญา…</div></div>
+      }
     }
 
     <!-- issue invoice dialog -->
     @if (issuePeriod(); as p) {
-      <div class="modal-backdrop" (click)="issuePeriod.set(null)">
+      <div class="modal-backdrop" appModal (dismiss)="issuePeriod.set(null)">
         <div class="modal" (click)="$event.stopPropagation()">
           <div class="modal-head"><h2>ออกใบแจ้งหนี้ งวดที่ {{ p.periodNo }}</h2></div>
           <div class="modal-body">
@@ -210,12 +224,12 @@ import {
             <div class="grid grid-2">
               <div class="field">
                 <label>วันที่ออกใบแจ้งหนี้</label>
-                <input type="date" [(ngModel)]="issueForm.issueDate" />
+                <app-date-input [(ngModel)]="issueForm.issueDate" />
               </div>
               @if (contract()?.pricingMode === 'PAY_PER_USE') {
                 <div class="field">
                   <label>จำนวน {{ contract()?.unitName || 'หน่วย' }}</label>
-                  <input type="number" min="0" [(ngModel)]="issueForm.usageQty" />
+                  <input type="number" min="0" [ngModel]="usageQty()" (ngModelChange)="usageQty.set(Math.max(0, +$event || 0))" />
                 </div>
               }
             </div>
@@ -238,20 +252,20 @@ import {
 
     <!-- renew dialog -->
     @if (renewOpen()) {
-      <div class="modal-backdrop" (click)="renewOpen.set(false)">
+      <div class="modal-backdrop" appModal (dismiss)="renewOpen.set(false)">
         <div class="modal" (click)="$event.stopPropagation()">
           <div class="modal-head"><h2>ต่อสัญญาใหม่</h2></div>
           <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
             <div class="field"><label>เลขที่สัญญาใหม่</label><input [(ngModel)]="renewForm.contractNo" /></div>
             <div class="grid grid-2">
-              <div class="field"><label>วันเริ่ม</label><input type="date" [(ngModel)]="renewForm.startDate" /></div>
-              <div class="field"><label>วันสิ้นสุด</label><input type="date" [(ngModel)]="renewForm.endDate" /></div>
+              <div class="field"><label>วันเริ่ม</label><app-date-input [(ngModel)]="renewForm.startDate" /></div>
+              <div class="field"><label>วันสิ้นสุด</label><app-date-input [(ngModel)]="renewForm.endDate" /></div>
             </div>
             <div class="small muted">ระบบจะคัดลอกเงื่อนไข ราคา และรายการเครื่องจากสัญญาเดิม</div>
           </div>
           <div class="modal-foot">
             <button class="btn" (click)="renewOpen.set(false)">ยกเลิก</button>
-            <button class="btn primary" (click)="renew()">สร้างสัญญาต่อเนื่อง</button>
+            <button class="btn primary" (click)="renew()" [disabled]="saving()">สร้างสัญญาต่อเนื่อง</button>
           </div>
         </div>
       </div>
@@ -259,6 +273,8 @@ import {
   `,
 })
 export class ContractDetailComponent implements OnInit {
+  // ข้อความเมื่อโหลดข้อมูลหลักของหน้าไม่สำเร็จ
+  readonly loadError = signal('');
   readonly id = input.required<string>();
 
   private api = inject(ApiService);
@@ -271,8 +287,11 @@ export class ContractDetailComponent implements OnInit {
   readonly renewOpen = signal(false);
   readonly saving = signal(false);
 
-  readonly today = new Date().toISOString().slice(0, 10);
-  issueForm = { issueDate: new Date().toISOString().slice(0, 10), usageQty: 0 };
+  readonly today = todayIso();
+  issueForm = { issueDate: todayIso() };
+  // จำนวนที่ใช้ของสัญญาแบบจ่ายตามใช้ เป็น signal ยอดเงินถึงจะคำนวณใหม่ทุกครั้งที่พิมพ์
+  readonly usageQty = signal(0);
+  readonly Math = Math;
   renewForm = { contractNo: '', startDate: '', endDate: '' };
 
   readonly baht = baht;
@@ -282,6 +301,7 @@ export class ContractDetailComponent implements OnInit {
   readonly thaiDateShort = thaiDateShort;
   readonly typeLabel = (t: string) => CONTRACT_TYPE_LABEL[t] ?? t;
   readonly cycleLabel = (c: string) => BILLING_CYCLE_LABEL[c] ?? c;
+  readonly statusLabel = (s: string) => CONTRACT_STATUS_LABEL[s] ?? { text: s, tone: '' };
   readonly stateLabel = (s: string) => PAYMENT_STATE_LABEL[s]?.text ?? s;
 
   readonly dueUninvoiced = computed(() =>
@@ -300,7 +320,7 @@ export class ContractDetailComponent implements OnInit {
     const c = this.contract();
     const p = this.issuePeriod();
     if (!c || !p) return 0;
-    if (c.pricingMode === 'PAY_PER_USE') return Math.round((c.unitPrice ?? 0) * (this.issueForm.usageQty || 0) * 100) / 100;
+    if (c.pricingMode === 'PAY_PER_USE') return Math.round((c.unitPrice ?? 0) * (this.usageQty() || 0) * 100) / 100;
     return p.expectedAmount ?? c.periodAmount ?? 0;
   });
   readonly issueVat = computed(() => Math.round(this.issueAmount() * ((this.contract()?.vatRate ?? 0) / 100) * 100) / 100);
@@ -315,19 +335,18 @@ export class ContractDetailComponent implements OnInit {
         this.contract.set(c);
         this.renewForm = {
           contractNo: `${c.contractNo.replace(/\d{4}$/, (y) => String(Number(y) + 1))}`,
-          startDate: addOneYear(c.startDate),
-          endDate: addOneYear(c.endDate),
+          ...renewalRange(c.endDate),
         };
       },
-      error: (e) => this.toast.error(errorMessage(e)),
+      error: (e) => this.loadError.set(errorMessage(e)),
     });
   }
 
   openIssue(p: Period) {
     this.issueForm = {
-      issueDate: new Date().toISOString().slice(0, 10),
-      usageQty: 0,
+      issueDate: todayIso(),
     };
+    this.usageQty.set(0);
     this.issuePeriod.set(p);
   }
 
@@ -340,7 +359,13 @@ export class ContractDetailComponent implements OnInit {
       periodId: p.id,
       issueDate: this.issueForm.issueDate,
     };
-    if (c.pricingMode === 'PAY_PER_USE') body['usageQty'] = this.issueForm.usageQty;
+    if (c.pricingMode === 'PAY_PER_USE') {
+      if (!(this.usageQty() > 0)) {
+        this.toast.error('กรอกจำนวนที่ใช้ให้มากกว่า 0');
+        return;
+      }
+      body['usageQty'] = this.usageQty();
+    }
 
     this.saving.set(true);
     this.api.createInvoice(body).subscribe({
@@ -361,9 +386,25 @@ export class ContractDetailComponent implements OnInit {
     const candidates = this.bulkCandidates();
     if (!candidates.length) return;
     if (!confirm(`ออกใบแจ้งหนี้ให้ ${candidates.length} งวดที่ค้าง ณ วันที่ ${this.today} หรือไม่`)) return;
-    this.api.bulkInvoice({ periodIds: candidates.map((p) => p.id), issueDate: this.today }).subscribe({
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.api.bulkInvoice({ periodIds: candidates.map((p) => p.id), issueDate: this.today }).pipe(finalize(() => this.saving.set(false))).subscribe({
       next: (res) => {
         this.toast.success(`ออกใบแจ้งหนี้แล้ว ${res.createdCount} ใบ`);
+        this.load();
+      },
+      error: (e) => this.toast.error(errorMessage(e)),
+    });
+  }
+
+  // ยกเลิกสัญญาได้เฉพาะเมื่อไม่มีหนี้ค้าง ถ้ายังค้างระบบจะแจ้งจำนวนใบที่ค้าง
+  cancelContract() {
+    const contractNo = this.contract()?.contractNo ?? '';
+    if (!confirm(`ยืนยันการยกเลิกสัญญา ${contractNo}\nสถานะจะเปลี่ยนเป็นยกเลิก ข้อมูลเดิมยังเก็บไว้ครบ`)) return;
+    this.saving.set(true);
+    this.api.cancelContract(this.id()).pipe(finalize(() => this.saving.set(false))).subscribe({
+      next: () => {
+        this.toast.success(`ยกเลิกสัญญา ${contractNo} แล้ว`);
         this.load();
       },
       error: (e) => this.toast.error(errorMessage(e)),
@@ -375,14 +416,19 @@ export class ContractDetailComponent implements OnInit {
     if (!c) return;
     this.renewForm = {
       contractNo: `${c.contractNo}`.replace(/(\d{4})$/, (y) => String(Number(y) + 1)),
-      startDate: addOneYear(c.startDate),
-      endDate: addOneYear(c.endDate),
+      ...renewalRange(c.endDate),
     };
     this.renewOpen.set(true);
   }
 
   renew() {
-    this.api.renewContract(this.id(), this.renewForm).subscribe({
+    if (!this.renewForm.startDate || !this.renewForm.endDate || this.renewForm.endDate < this.renewForm.startDate) {
+      this.toast.error('วันสิ้นสุดสัญญาต้องไม่อยู่ก่อนวันเริ่มสัญญา');
+      return;
+    }
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.api.renewContract(this.id(), this.renewForm).pipe(finalize(() => this.saving.set(false))).subscribe({
       next: (res) => {
         this.toast.success('สร้างสัญญาต่อเนื่องแล้ว');
         this.renewOpen.set(false);
@@ -393,9 +439,16 @@ export class ContractDetailComponent implements OnInit {
   }
 }
 
-function addOneYear(iso: string): string {
-  const d = new Date(iso);
-  d.setFullYear(d.getFullYear() + 1);
-  d.setDate(d.getDate() - 1);
-  return d.toISOString().slice(0, 10);
+// คำนวณวันที่แบบ UTC ทั้งหมด ไม่ให้เขตเวลาของเครื่องทำวันเพี้ยน
+function shiftDate(iso: string, years: number, days: number): string {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
+  const date = new Date(Date.UTC(y + years, m - 1, d + days));
+  return date.toISOString().slice(0, 10);
+}
+
+// ช่วงสัญญาต่อเนื่อง เริ่มวันถัดจากวันสิ้นสุดสัญญาเดิม และยาว 1 ปี
+// เช่น สัญญาเดิมสิ้นสุด 31 ธ.ค. 2569 สัญญาใหม่ 1 ม.ค. ถึง 31 ธ.ค. 2570
+function renewalRange(oldEndDate: string): { startDate: string; endDate: string } {
+  const startDate = shiftDate(oldEndDate, 0, 1);
+  return { startDate, endDate: shiftDate(startDate, 1, -1) };
 }

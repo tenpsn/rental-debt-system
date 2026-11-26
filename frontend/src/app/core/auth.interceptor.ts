@@ -1,10 +1,14 @@
 import { HttpErrorResponse, HttpInterceptorFn } from '@angular/common/http';
 import { inject } from '@angular/core';
+import { Router } from '@angular/router';
 import { catchError, throwError } from 'rxjs';
 import { AuthService } from './auth.service';
+import { ToastService } from './toast.service';
 
 export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const auth = inject(AuthService);
+  const router = inject(Router);
+  const toast = inject(ToastService);
   const token = auth.token();
 
   const request = token && req.url.startsWith('/api')
@@ -14,7 +18,11 @@ export const authInterceptor: HttpInterceptorFn = (req, next) => {
   return next(request).pipe(
     catchError((error: HttpErrorResponse) => {
       if (error.status === 401 && !req.url.includes('/auth/login')) {
-        auth.logout();
+        // เข้าสู่ระบบหมดเวลา พากลับหน้าเข้าสู่ระบบพร้อมบอกเหตุผล
+        auth.expireSession(router.url);
+      } else if (req.method === 'GET') {
+        // โหลดข้อมูลไม่สำเร็จ บอกผู้ใช้ทุกครั้ง หน้าจอจะได้ไม่ดูเหมือนแค่ไม่มีข้อมูล
+        toast.error(`โหลดข้อมูลไม่สำเร็จ: ${errorMessage(error)}`);
       }
       return throwError(() => error);
     }),
